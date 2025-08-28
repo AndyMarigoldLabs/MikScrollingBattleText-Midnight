@@ -377,8 +377,21 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 			end
 		end -- Damage type and damage coloring is enabled.
 
-		-- Substitute all %a event codes with the amount.
-		message = string_gsub(message, "%%a", formattedAmount .. partialAmount)
+		-- Add percentage for outgoing damage
+		local percentageText = ""
+		if UnitExists("target") and amount > 0 then
+			local targetMaxHealth = UnitHealthMax("target")
+			if targetMaxHealth and targetMaxHealth > 0 then
+				local percentage = (amount / targetMaxHealth) * 100
+				if percentage >= 0.1 then
+					local roundedPercentage = math.floor(percentage * 10) / 10
+					percentageText = " (" .. roundedPercentage .. "%%)"
+				end
+			end
+		end
+
+		-- Substitute all %a event codes with the amount and percentage.
+		message = string_gsub(message, "%%a", formattedAmount .. partialAmount .. percentageText)
 	end -- Substitute amount.
 
 
