@@ -175,9 +175,26 @@ end
 -- Sends the parser event to the registered handlers.
 -- ****************************************************************************
 local function SendParserEvent()
+	-- Add percentage calculation for outgoing damage events
+	if parserEvent.eventType == "damage" and parserEvent.sourceUnit == "player" and parserEvent.amount then
+		if UnitExists("target") then
+			local targetMaxHealth = UnitHealthMax("target")
+			if targetMaxHealth and targetMaxHealth > 0 then
+				local percentage = (parserEvent.amount / targetMaxHealth) * 100
+				if percentage >= 0.1 then -- Only show if >= 0.1%
+					local roundedPercentage = math.floor(percentage * 10) / 10
+					-- Store the percentage in the parser event for MSBT to use
+					parserEvent.damagePercentage = roundedPercentage
+				end
+			end
+		end
+	end
+	
 	for handler in pairs(handlers) do
 		local success, ret = pcall(handler, parserEvent)
-		if (not success) then geterrorhandler()(ret) end
+		if not success then
+			geterrorhandler()(ret)
+		end
 	end
 end
 
