@@ -314,7 +314,13 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 	local currentProfile = MSBTProfiles.currentProfile
 	local checkParens
 
-	-- Substitute amount.
+	-- Full amount text, substituted into the message at the end of the function.
+	-- Midnight 12.x: substituting a secret amount turns the message into a secret
+	-- string, and string.find/gsub on a secret string error, so every pattern-based
+	-- substitution below must run while the message is still plain.
+	local fullAmountText
+
+	-- Compute the amount text if the message uses it.
 	if (amount and string_find(message, "%a", 1, true)) then
 		-- Check if there is overheal information and displaying it is enabled.
 		local partialAmount = ""
@@ -396,22 +402,9 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 			end
 		end
 
-		-- Substitute all %a event codes with the amount and percentage.
-		-- Midnight 12.x: gsub won't accept secret values; splice with plain find + concat instead.
-		local fullAmountText = formattedAmount .. partialAmount .. percentageText
-		if (issecretvalue(fullAmountText)) then
-			local out, rest = "", message
-			while (true) do
-				local startPos, endPos = string_find(rest, "%a", 1, true)
-				if (not startPos) then break end
-				out = out .. string_sub(rest, 1, startPos - 1) .. fullAmountText
-				rest = string_sub(rest, endPos + 1)
-			end
-			message = out .. rest
-		else
-			message = string_gsub(message, "%%a", fullAmountText)
-		end
-	end -- Substitute amount.
+		-- Build the full amount text; it is spliced into the message at the end.
+		fullAmountText = formattedAmount .. partialAmount .. percentageText
+	end -- Compute amount text.
 
 
 	-- Substitute power type.
@@ -499,6 +492,25 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 
 	-- Append the merge trailer if there is one.
 	if (mergeTrailer) then message = message .. mergeTrailer end
+
+	-- Substitute all %a event codes with the amount text. This runs last because a
+	-- secret amount turns the message into a secret string, which none of the
+	-- pattern-based substitutions above can operate on.
+	if (fullAmountText) then
+		-- Midnight 12.x: gsub won't accept secret values; splice with plain find + concat instead.
+		if (issecretvalue(fullAmountText)) then
+			local out, rest = "", message
+			while (true) do
+				local startPos, endPos = string_find(rest, "%a", 1, true)
+				if (not startPos) then break end
+				out = out .. string_sub(rest, 1, startPos - 1) .. fullAmountText
+				rest = string_sub(rest, endPos + 1)
+			end
+			message = out .. rest
+		else
+			message = string_gsub(message, "%%a", fullAmountText)
+		end
+	end
 
 	-- Return the formatted message.
 	return message

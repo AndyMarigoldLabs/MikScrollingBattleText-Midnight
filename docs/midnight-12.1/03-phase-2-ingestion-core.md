@@ -20,7 +20,7 @@ Architecture: keep one parser frame and the `parserEvent`/`SendParserEvent()` fa
 
 ## Non-negotiable rule: secret-safe pipeline
 
-Secret values may be stored, passed, concatenated, and `string.format`-ed — never compared, arithmetized, length-measured, indexed, or used as table keys (immediate Lua error). Concretely:
+Secret values may be stored, passed, concatenated, and `string.format`-ed — never compared, arithmetized, length-measured, indexed, used as table keys, **or passed to string-library functions** (`string.find`/`gsub`/`sub`/`len`/… — immediate Lua error, confirmed live 2026-08-28: "attempt to perform string conversion on a secret string value"). Concatenating a secret into a message makes the *whole message* secret, so all pattern work must complete before the secret joins the string. Concretely:
 
 - [ ] Every value arriving from a game API is treated as possibly-secret: format text via `string.format`/concat and hand straight to `FontString:SetText`; **branch on contents only behind `issecretvalue()` guards**.
 - [ ] School-coloring, merge windows, throttles, crit amplification, % calculations run only when `not issecretvalue(amount)`; otherwise emit plain formatted text.
@@ -35,7 +35,7 @@ Secret values may be stored, passed, concatenated, and `string.format`-ed — ne
 - [x] **CTU translator:** `ParseCombatTextUpdate` (`MSBTParser.lua:527`) handles player auras (`SPELL_AURA_START/END[_HARMFUL]` → buff/debuff gain/fade), incoming heals (all 8 `HEAL` types), power gains (`ENERGIZE`/`PERIODIC_ENERGIZE` → token→`Enum.PowerType` map), `INTERRUPT`, `EXTRA_ATTACKS`; `C_CombatText.SetActiveUnit("player")` at Enable. Damage/miss types deliberately skipped (UNIT_COMBAT owns them); `FACTION`/`HONOR_GAINED`/`HEALTH_LOW`/etc. skipped to avoid duplicating existing paths.
 - [x] **Killing blows:** `ParsePartyKill` (`MSBTParser.lua:613`) — `attackerGUID == playerGUID`, victim classified PC/NPC by GUID prefix, name via `UnitNameFromGUID`; silently skipped when GUIDs are secret (restricted content). `UNIT_DIED`/`PLAYER_TARGET_DIED` not needed.
 - [~] **Loot module rewiring:** chat parsing kept with a secrecy guard at `ParseSearchMessage` (secret chat in instances can't be pattern-matched). **`UNIT_LOOT` investigated and dropped: its payload is `unitGUID, hasLoot` — a "corpse has loot" ping, not looted-item data.** Loot/money/currency alerts work outside instances only (12.x limitation).
-- [x] **Merge/throttle subsystems:** `ParserEventsHandler` forces direct display when `parserEvent.amount` is secret; `FormatEvent` skips shorten/group and splices `%a` via plain find+concat for secret amounts; damage/heal/power threshold checks skip secrets (show unthresholded). — *done 2026-08-27*
+- [x] **Merge/throttle subsystems:** `ParserEventsHandler` forces direct display when `parserEvent.amount` is secret; `FormatEvent` skips shorten/group and splices `%a` via plain find+concat for secret amounts; damage/heal/power threshold checks skip secrets (show unthresholded). — *done 2026-08-27; fixed 2026-08-28 after live validation:* splicing `%a` turns `message` itself into a secret string, and every later `string.find`/`gsub` on it (`%n`/`%e`/`%s`/paren-cleanup/`%t`) errors with "attempt to perform string conversion on a secret string value". `%a` substitution now runs **last** in `FormatEvent` so all pattern work happens while the message is still plain.
 - [ ] **Test matrix run** (below). — *pending in-game*
 
 ### Additional implementation decisions (2026-08-27)
