@@ -45,7 +45,7 @@ Technical write-ups, phase plans, and the in-game test guide: [docs/midnight-12.
 
 ## Installation
 
-1. Download the zipped addon from the [releases page](https://github.com/Placidina/MikScrollingBattleText/releases).
+1. Download the zipped addon from the [releases page](https://github.com/AndyMarigoldLabs/MikScrollingBattleText-Midnight/releases).
 2. Extract and place the `MikScrollingBattleText` and `MSBTOptions` folders in `World of Warcraft/_retail_/Interface/AddOns/`.
 3. Enable both in the addon list.
 
