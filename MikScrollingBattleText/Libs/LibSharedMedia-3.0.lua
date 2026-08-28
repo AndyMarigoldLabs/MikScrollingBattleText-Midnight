@@ -20,7 +20,7 @@ local _G = getfenv(0)
 local pairs		= _G.pairs
 local type		= _G.type
 
-local band			= _G.bit.band
+local band			= _G.bit and _G.bit.band or _G.bit32 and _G.bit32.band -- 12.x compat: legacy bit library may be gone
 local table_sort	= _G.table.sort
 
 local RESTRICTED_FILE_ACCESS = WOW_PROJECT_ID == WOW_PROJECT_MAINLINE -- starting with 8.2, some rules for file access have changed; classic still uses the old way

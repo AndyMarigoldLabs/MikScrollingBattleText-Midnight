@@ -26,9 +26,10 @@ local SplitString = MikSBT.SplitString
 local Print = MikSBT.Print
 local GetSkillName = MikSBT.GetSkillName
 
-local IsClassic = WOW_PROJECT_ID >= WOW_PROJECT_CLASSIC
-local LoadAddOn = C_AddOns and C_AddOns.LoadAddOn or LoadAddOn
-local IsAddOnLoaded = C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded
+-- Compat shims live in MikSBT.lua so all modules share one set of fallbacks.
+local IsClassic = MikSBT.IsClassic
+local LoadAddOn = MikSBT.LoadAddOn
+local IsAddOnLoaded = MikSBT.IsAddOnLoaded
 
 
 -------------------------------------------------------------------------------
@@ -55,7 +56,6 @@ local REACTION_HOSTILE			= 0x00000040
 --local SPELLID_BERSERK			= 93622
 local SPELLID_ELUSIVE_BREW		= 126453 -- Activated ability
 local SPELLID_EXECUTE			= 5308
-local SPELLID_FIRST_AID			= 3273
 local SPELLID_HAMMER_OF_WRATH	= 24275
 --local SPELLID_KILL_SHOT		= 53351
 local SPELLID_LAVA_SURGE		= not IsClassic and 77762
@@ -1006,6 +1006,16 @@ if IsClassic then
 			NOTIFICATION_COMBAT_LEAVE = {
 				message		= "-" .. L.MSG_COMBAT,
 			},
+			NOTIFICATION_LOW_HEALTH = {
+				colorG		= 0.5,
+				colorB		= 0.5,
+				message		= L.MSG_TRIGGER_LOW_HEALTH .. "!",
+			},
+			NOTIFICATION_LOW_MANA = {
+				colorR		= 0.5,
+				colorG		= 0.5,
+				message		= L.MSG_TRIGGER_LOW_MANA .. "!",
+			},
 			NOTIFICATION_POWER_GAIN = {
 				colorB		= 0,
 				message		= "+%a %p",
@@ -1337,7 +1347,6 @@ if IsClassic then
 				soundFile		= "MSBT Low Health",
 				mainEvents		= "UNIT_HEALTH{unitID;;eq;;player;;threshold;;lt;;35}",
 				exceptions		= "recentlyFired;;lt;;5",
-				iconSkill		= SPELLID_FIRST_AID,
 			},
 			MSBT_TRIGGER_LOW_MANA = {
 				colorR			= 0.5,
@@ -2471,6 +2480,16 @@ else
 			NOTIFICATION_COMBAT_LEAVE = {
 				message		= "-" .. L.MSG_COMBAT,
 			},
+			NOTIFICATION_LOW_HEALTH = {
+				colorG		= 0.5,
+				colorB		= 0.5,
+				message		= L.MSG_TRIGGER_LOW_HEALTH .. "!",
+			},
+			NOTIFICATION_LOW_MANA = {
+				colorR		= 0.5,
+				colorG		= 0.5,
+				message		= L.MSG_TRIGGER_LOW_MANA .. "!",
+			},
 			NOTIFICATION_POWER_GAIN = {
 				colorB		= 0,
 				message		= "+%a %p",
@@ -2814,7 +2833,6 @@ else
 				soundFile		= "MSBT Low Health",
 				mainEvents		= "UNIT_HEALTH{unitID;;eq;;player;;threshold;;lt;;35}",
 				exceptions		= "recentlyFired;;lt;;5",
-				iconSkill		= SPELLID_FIRST_AID,
 			},
 			MSBT_TRIGGER_LOW_MANA = {
 				colorR			= 0.5,
@@ -3704,8 +3722,8 @@ local function OnEvent(this, event, arg1)
 		-- Let the media module know the variables are initialized.
 		MikSBT.Media.OnVariablesInitialized()
 
-	-- Variables for all addons loaded.
-	elseif (event == "VARIABLES_LOADED") then
+	-- Player login (saved variables are guaranteed to be loaded at this point).
+	elseif (event == "PLAYER_LOGIN") then
 		-- Disable or enable the mod depending on the saved setting.
 		SetOptionUserDisabled(IsModDisabled())
 
@@ -3734,9 +3752,9 @@ eventFrame:SetHeight(0.0001)
 eventFrame:Hide()
 eventFrame:SetScript("OnEvent", OnEvent)
 
--- Register events for when the mod is loaded and variables are loaded.
+-- Register events for when the mod is loaded and the player logs in.
 eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("VARIABLES_LOADED")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
 
 
 

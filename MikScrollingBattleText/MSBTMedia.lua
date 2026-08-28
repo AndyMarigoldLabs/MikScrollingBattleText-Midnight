@@ -55,7 +55,7 @@ local sounds = {}
 
 -- ****************************************************************************
 -- Registers a font.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function RegisterFont(fontName, fontPath)
 	-- Don't do anything if the font name or font path is invalid.
@@ -70,7 +70,7 @@ end
 
 -- ****************************************************************************
 -- Returns an iterator for the table containing the registered fonts.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function IterateFonts()
 	return pairs(fonts)
@@ -83,7 +83,7 @@ end
 
 -- ****************************************************************************
 -- Registers a sound.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function RegisterSound(soundName, soundPath)
 	-- Don't do anything if the sound name or sound path is invalid.
@@ -106,7 +106,7 @@ end
 
 -- ****************************************************************************
 -- Returns an iterator for the table containing the registered sounds.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function IterateSounds()
 	return pairs(sounds)

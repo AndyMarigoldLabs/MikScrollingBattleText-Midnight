@@ -32,8 +32,6 @@ local ShortenNumber = MikSBT.ShortenNumber
 
 -- Local reference to various variables for faster access.
 local REACTION_HOSTILE = MSBTParser.REACTION_HOSTILE
-local unitMap = MSBTParser.unitMap
-local classMap = MSBTParser.classMap
 
 local MSBTGetSpellInfo = MikSBT.MSBTGetSpellInfo
 local MSBTGetSpellCooldown = MikSBT.MSBTGetSpellCooldown
@@ -60,14 +58,13 @@ local _
 -- Holds dynamically created frame for receiving events.
 local eventFrame
 
--- Holds the player's name, GUID, and class.
-local playerName, playerGUID, playerClass
+-- Holds the player's name and class.
+local playerName, playerClass
 
 -- Events the triggers use.
 local listenEvents = {}
 
--- Functions to handle combat log events and conditions.
-local captureFuncs
+-- Functions to handle conditions.
 local testFuncs
 local eventConditionFuncs
 local exceptionConditionFuncs
@@ -75,7 +72,6 @@ local exceptionConditionFuncs
 -- Holds triggers in a format optimized for searching.
 local categorizedTriggers = {}
 local triggerExceptions = {}
-local parserEvent = {}
 local lookupTable = {}
 
 -- Information about triggers used for condition checking.
@@ -106,7 +102,9 @@ local function IsSkillUnavailable(skillName)
 	if (not MSBTGetSpellInfo(skillName)) then return true end
 
 	-- Pass check if the skillName is cooling down (but ignore the global cooldown).
+	-- Midnight 12.x: cooldown values are secret in combat; treat the skill as available then.
 	local start, duration = MSBTGetSpellCooldown(skillName)
+	if (not start or issecretvalue(start) or issecretvalue(duration)) then return end
 	if (start > 0 and duration > 1.5) then return true end
 end
 
@@ -123,29 +121,6 @@ local function CreateTestFuncs()
 		lt = function(l, r) return type(l)=="number" and type(r)=="number" and l < r end,
 		gt = function(l, r) return type(l)=="number" and type(r)=="number" and l > r end,
 	}
-end
-
-
--- ****************************************************************************
--- Creates a map of capture functions for supported combat log events.
--- Also makes use of the ones already defined in the parser module.
--- ****************************************************************************
-local function CreateCaptureFuncs()
-	captureFuncs = {
-		-- Leave out eventType because we really don't care about it for triggers.
-		SPELL_AURA_BROKEN_SPELL = function (p, ...) p.skillID, p.skillName, p.skillSchool, p.extraSkillID, p.extraSkillName, p.extraSkillSchool, p.auraType = ... end,
-		SPELL_AURA_REFRESH = function (p, ...) p.skillID, p.skillName, p.skillSchool, p.auraType = ... end,
-		SPELL_CAST_SUCCESS = function (p, ...) p.skillID, p.skillName, p.skillSchool = ... end,
-		SPELL_CAST_FAILED = function (p, ...) p.skillID, p.skillName, p.skillSchool, p.missType = ... end,
-		SPELL_SUMMON = function (p, ...) p.skillID, p.skillName, p.skillSchool = ... end,
-		SPELL_CREATE = function (p, ...) p.skillID, p.skillName, p.skillSchool = ... end,
-		UNIT_DIED = function (p, ...) end,
-		UNIT_DESTROYED = function (p, ...) end,
-	}
-
-	-- Make use of the parser module capture functions instead of redefining them.
-	captureFuncs.__index = MSBTParser.captureFuncs
-	setmetatable(captureFuncs, captureFuncs)
 end
 
 
@@ -210,13 +185,21 @@ local function CreateConditionFuncs()
 	}
 
 
+	-- Midnight 12.x: name-based aura lookups are not callable while aura access is
+	-- secret; treat failures as "not active" instead of erroring.
+	local function IsPlayerBuffActive(buffName)
+		if (not C_UnitAuras or not C_UnitAuras.GetAuraDataBySpellName) then return false end
+		local ok, auraData = pcall(C_UnitAuras.GetAuraDataBySpellName, "player", buffName)
+		return ok and auraData ~= nil
+	end
+
 	-- Exception conditions.
 	exceptionConditionFuncs = {
 		activeTalents = function (f, t, v) return f(GetActiveSpecGroup(), v) end,
-		buffActive = function (f, t, v) return UnitBuff("player", v) and true or false end,
-		buffInactive = function (f, t, v) return not UnitBuff("player", v) and true or false end,
+		buffActive = function (f, t, v) return IsPlayerBuffActive(v) end,
+		buffInactive = function (f, t, v) return not IsPlayerBuffActive(v) end,
 		currentCP = function (f, t, v) return f(GetComboPoints("player"), v) end,
-		currentPower = function (f, t, v) return f(UnitPower("player"), v) end,
+		currentPower = function (f, t, v) local p = UnitPower("player") if (not issecretvalue(p)) then return f(p, v) end end,
 		inCombat = function (f, t, v) return f(UnitAffectingCombat("player") == true and true or false, v) end,
 		recentlyFired = function (f, t, v) return f(GetTime() - firedTimes[t], v) end,
 		trivialTarget = function (f, t, v) return f(UnitIsTrivial("target") == true and true or false, v) end,
@@ -269,7 +252,6 @@ local function CategorizeTrigger(triggerSettings)
 
 		-- Check for special consolidated miss events.
 		if (mainEvent == "GENERIC_MISSED") then
-			listenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
 
 			-- Create a table to hold an array of the triggers for the main events if there isn't already one for it.
 			if (not categorizedTriggers["SWING_MISSED"]) then categorizedTriggers["SWING_MISSED"] = {} end
@@ -283,7 +265,6 @@ local function CategorizeTrigger(triggerSettings)
 
 		-- Consolidated damage.
 		elseif (mainEvent == "GENERIC_DAMAGE") then
-			listenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
 
 			-- Create a table to hold an array of the triggers for the main events if there isn't already one for it.
 			if (not categorizedTriggers["SWING_DAMAGE"]) then categorizedTriggers["SWING_DAMAGE"] = {} end
@@ -297,7 +278,6 @@ local function CategorizeTrigger(triggerSettings)
 
 		-- Consolidated aura application.
 		elseif (mainEvent == "SPELL_AURA_APPLIED") then
-			listenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
 
 			-- Create a table to hold an array of the triggers for the main events if there isn't already one for it.
 			if (not categorizedTriggers["SPELL_AURA_APPLIED"]) then categorizedTriggers["SPELL_AURA_APPLIED"] = {} end
@@ -319,7 +299,6 @@ local function CategorizeTrigger(triggerSettings)
 
 		-- Consolidated aura removal.
 		elseif (mainEvent == "SPELL_AURA_REMOVED") then
-			listenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
 
 			-- Create a table to hold an array of the triggers for the main events if there isn't already one for it.
 			if (not categorizedTriggers["SPELL_AURA_REMOVED"]) then categorizedTriggers["SPELL_AURA_REMOVED"] = {} end
@@ -429,11 +408,6 @@ local function CategorizeTrigger(triggerSettings)
 			elseif (mainEvent == "ITEM_COOLDOWN") then
 				eventConditions[#eventConditions+1] = conditions
 				MikSBT.Cooldowns.UpdateRegisteredEvents()
-
-			-- Combat log event.
-			elseif (captureFuncs[mainEvent]) then
-				listenEvents["COMBAT_LOG_EVENT_UNFILTERED"] = true
-				eventConditions[#eventConditions+1] = conditions
 			end
 		end -- Specific events check.
 	end -- Loop through conditions.
@@ -723,40 +697,23 @@ end
 
 
 -- ****************************************************************************
--- Handles triggers for combat log events.
+-- Handles parser events for aura triggers. Midnight 12.x: player aura events
+-- come from COMBAT_TEXT_UPDATE via the parser since the combat log was removed.
 -- ****************************************************************************
-local function HandleCombatLogTriggers(timestamp, event, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, recipientGUID, recipientName, recipientFlags, recipientRaidFlags, ...)
-	-- Ignore the event if there are no triggers to search for it.
-	if (not categorizedTriggers[event]) then return end
+local function ParserEventsHandler(event)
+	-- Only player aura events can drive triggers now.
+	if (event.eventType ~= "aura" or event.recipientUnit ~= "player") then return end
 
-	-- Make sure the capture function for the event exists.
-	local captureFunc = captureFuncs[event]
-	if (not captureFunc) then return end
-
-
-	-- Erase the parser event table.
-	for k in pairs(parserEvent) do parserEvent[k] = nil end
-
-	-- Populate fields that exist for all events.
-	parserEvent.sourceGUID = sourceGUID
-	parserEvent.sourceName = sourceName
-	parserEvent.sourceFlags = sourceFlags
-	parserEvent.recipientGUID = recipientGUID
-	parserEvent.recipientName = recipientName
-	parserEvent.recipientFlags = recipientFlags
-	parserEvent.sourceUnit = unitMap[sourceGUID]
-	parserEvent.recipientUnit = unitMap[recipientGUID]
-
-
-	-- Map the local arguments into the parser event table.
-	captureFunc(parserEvent, ...)
-
+	-- Map the aura event back to the trigger main event names.
+	local mainEvent = event.isFade and "SPELL_AURA_REMOVED" or "SPELL_AURA_APPLIED"
+	local eventTriggers = categorizedTriggers[mainEvent]
+	if (not eventTriggers) then return end
 
 	-- Erase the list of triggers to fire.
 	for k in pairs(triggersToFire) do triggersToFire[k] = nil end
 
 	-- Loop through the conditions list for the main event.
-	for _, eventConditions in ipairs(categorizedTriggers[event]) do
+	for _, eventConditions in ipairs(eventTriggers) do
 		-- Trigger fires by default.
 		local doFire = true
 
@@ -767,7 +724,7 @@ local function HandleCombatLogTriggers(timestamp, event, hideCaster, sourceGUID,
 				-- Test the condition and if it fails, don't waste time checking other conditions.
 				local conditionFunc = eventConditionFuncs[eventConditions[position]]
 				local testFunc = testFuncs[eventConditions[position+1]]
-				if (conditionFunc and testFunc and not conditionFunc(testFunc, parserEvent, eventConditions[position+2])) then doFire = false break end
+				if (conditionFunc and testFunc and not conditionFunc(testFunc, event, eventConditions[position+2])) then doFire = false break end
 			end -- Conditions loop.
 
 			-- Set the trigger to be fired if none of the conditions failed.
@@ -775,23 +732,12 @@ local function HandleCombatLogTriggers(timestamp, event, hideCaster, sourceGUID,
 		end
 	end
 
-	-- Get the texture for the event and display triggers that aren't excepted.
+	-- Display the fired triggers if none of the exceptions are true.
 	if (next(triggersToFire)) then
-		local effectTexture
-		if (parserEvent.skillID or parserEvent.extraSkillID) then _, _, effectTexture = MSBTGetSpellInfo(parserEvent.extraSkillID or parserEvent.skillID) end
-
-		-- Display the fired triggers if none of the exceptions are true.
-		local sourceName = parserEvent.sourceName
-		local recipientName = parserEvent.recipientName
-		local sourceClass = classMap[sourceGUID]
-		local recipientClass = classMap[recipientGUID]
-		local skillName = parserEvent.skillName
-		local extraSkillName = parserEvent.extraSkillName
-		local amount = parserEvent.amount
 		for triggerSettings in pairs(triggersToFire) do
-			if (not TestExceptions(triggerSettings)) then DisplayTrigger(triggerSettings, sourceName, sourceClass, recipientName, recipientClass, skillName, extraSkillName, amount, effectTexture) end
+			if (not TestExceptions(triggerSettings)) then DisplayTrigger(triggerSettings, nil, nil, playerName, playerClass, event.skillName, nil, event.amount, nil) end
 		end
-	end -- Triggers to fire?
+	end
 end
 
 
@@ -807,7 +753,10 @@ local function OnEvent(this, event, arg1, arg2, ...)
 	if (event == "UNIT_HEALTH") then
 		-- Ignore the event if there are no triggers to search for it.
 		if (not categorizedTriggers[event] or not categorizedTriggers[event][arg1]) then return end
-		HandleHealthAndPowerTriggers(arg1, event, UnitHealth(arg1), UnitHealthMax(arg1))
+		-- Midnight 12.x: health values are secret in restricted content; no comparisons allowed.
+		local current, max = UnitHealth(arg1), UnitHealthMax(arg1)
+		if (issecretvalue(current) or issecretvalue(max)) then return end
+		HandleHealthAndPowerTriggers(arg1, event, current, max)
 
 	-- Power.
 	elseif (event == "UNIT_POWER_UPDATE") then
@@ -816,11 +765,10 @@ local function OnEvent(this, event, arg1, arg2, ...)
 		local powerType = powerTypes[arg2]
 		if (not powerType) then return end
 		if (not categorizedTriggers[event][powerType] or not categorizedTriggers[event][powerType][arg1]) then return end
-		HandleHealthAndPowerTriggers(arg1, event, UnitPower(arg1, powerType), UnitPowerMax(arg1, powerType), powerType)
-
-	-- Combat log event.
-	elseif (event == "COMBAT_LOG_EVENT_UNFILTERED") then
-		HandleCombatLogTriggers(CombatLogGetCurrentEventInfo())
+		-- Midnight 12.x: power values are secret in restricted content; no comparisons allowed.
+		local current, max = UnitPower(arg1, powerType), UnitPowerMax(arg1, powerType)
+		if (issecretvalue(current) or issecretvalue(max)) then return end
+		HandleHealthAndPowerTriggers(arg1, event, current, max, powerType)
 
 	end -- Event types.
 end
@@ -834,6 +782,9 @@ local function Enable()
 	for event in pairs(listenEvents) do
 		eventFrame:RegisterEvent(event)
 	end
+
+	-- Midnight 12.x: player aura triggers are driven by parser events.
+	MSBTParser.RegisterHandler(ParserEventsHandler)
 end
 
 
@@ -843,6 +794,9 @@ end
 local function Disable()
 	-- Unregister all of the events from the event frame.
 	eventFrame:UnregisterAllEvents()
+
+	-- Stop receiving parser events.
+	MSBTParser.UnregisterHandler(ParserEventsHandler)
 end
 
 
@@ -852,7 +806,6 @@ end
 
 -- Get the player's name and class.
 playerName = UnitName("player")
-playerGUID = UnitGUID("player")
 _, playerClass = UnitClass("player")
 
 -- Create a frame to receive events.
@@ -861,7 +814,6 @@ eventFrame:Hide()
 eventFrame:SetScript("OnEvent", OnEvent)
 
 -- Create function maps.
-CreateCaptureFuncs()
 CreateTestFuncs()
 CreateConditionFuncs()
 
@@ -896,7 +848,6 @@ module.powerTypes				= powerTypes
 
 -- Protected Functions.
 module.HandleCooldowns			= HandleCooldowns
-module.HandleCombatLogTriggers	= HandleCombatLogTriggers
 module.ConvertType				= ConvertType
 module.UpdateTriggers			= UpdateTriggers
 module.Enable					= Enable

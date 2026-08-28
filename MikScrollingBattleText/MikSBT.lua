@@ -27,6 +27,18 @@ local GetSpellInfo = C_Spell and C_Spell.GetSpellInfo or GetSpellInfo
 local GetSpellCooldown = C_Spell and C_Spell.GetSpellCooldown or GetSpellCooldown
 local GetSpellTexture = C_Spell and C_Spell.GetSpellTexture or GetSpellTexture
 
+-- Shared compat shims so every module imports modern API fallbacks from one place.
+mod.IsClassic = IsClassic
+mod.LoadAddOn = LoadAddOn
+mod.GetAddOnMetadata = GetAddOnMetadata
+mod.IsAddOnLoaded = C_AddOns and C_AddOns.IsAddOnLoaded or IsAddOnLoaded
+mod.GetSpellInfo = GetSpellInfo
+mod.GetSpellCooldown = GetSpellCooldown
+mod.GetSpellTexture = GetSpellTexture
+mod.GetItemInfo = C_Item and C_Item.GetItemInfo or GetItemInfo
+mod.GetItemCount = C_Item and C_Item.GetItemCount or GetItemCount
+mod.GetItemClassInfo = C_Item and C_Item.GetItemClassInfo or _G.GetItemClassInfo
+
 -------------------------------------------------------------------------------
 -- Mod constants
 -------------------------------------------------------------------------------
@@ -158,7 +170,7 @@ local function MSBTGetSpellCooldown(spell)
             return nil, nil, nil, nil
         end
 
-		return spellCooldownInfo.startTime, spellCooldownInfo.duration, spellCooldownInfo.isEnabled, spellCooldownInfo.modRate
+		return spellCooldownInfo.startTime, spellCooldownInfo.duration, spellCooldownInfo.isEnabled, spellCooldownInfo.modRate, spellCooldownInfo.isActive
     end
 
 	return GetSpellCooldown(spell)

@@ -18,6 +18,7 @@ local string_find = string.find
 local string_gmatch = string.gmatch
 local string_gsub = string.gsub
 local string_len = string.len
+local bit = bit or bit32 -- 12.x compat: fall back to bit32 if the legacy bit library is gone.
 local bit_band = bit.band
 local bit_bor = bit.bor
 local GetTime = GetTime
@@ -27,10 +28,6 @@ local UnitName = UnitName
 local Print = MikSBT.Print
 local EraseTable = MikSBT.EraseTable
 local MSBTGetSpellInfo = MikSBT.MSBTGetSpellInfo
-
-local Obliterate = MSBTGetSpellInfo(49020)
-local FrostStrike = MSBTGetSpellInfo(49143)
-local Stormstrike = MSBTGetSpellInfo(17364)
 
 
 -------------------------------------------------------------------------------
@@ -59,10 +56,6 @@ local OBJECT_NONE			= 0x80000000
 -- Value when there is no GUID.
 local GUID_NONE				= "0x0000000000000000"
 
--- The maximum number of buffs and debuffs that can be on a unit.
-local MAX_BUFFS = 40
-local MAX_DEBUFFS = 40
-
 -- Aura types.
 local AURA_TYPE_BUFF = "BUFF"
 local AURA_TYPE_DEBUFF = "DEBUFF"
@@ -70,13 +63,30 @@ local AURA_TYPE_DEBUFF = "DEBUFF"
 -- Update timings.
 local UNIT_MAP_UPDATE_DELAY = 0.2
 local PET_UPDATE_DELAY = 1
-local REFLECT_HOLD_TIME = 3
 local CLASS_HOLD_TIME = 300
+
+-- Cast correlation for the Midnight 12.x UNIT_COMBAT feed.
+local CAST_CORRELATION_WINDOW = 1.2
+local MAX_RECENT_CASTS = 10
+
+-- Long-duration ground effects (seconds) whose ticks outlive the correlation window.
+local PERSISTENT_SPELLS = {
+	[73920]  = 12, -- Shaman: Healing Rain / Acid Rain
+	[265046] = 12, -- Shaman: Earthen Wall Totem
+	[190356] = 8,  -- Mage: Blizzard
+	[2120]   = 8,  -- Mage: Flamestrike
+	[26573]  = 10, -- Paladin: Consecration
+	[145205] = 10, -- Druid: Efflorescence
+	[43265]  = 10, -- DK: Death and Decay
+	[5740]   = 8,  -- Warlock: Rain of Fire
+}
+
+-- Synthesized recipient flags for killing blows (based on the victim's GUID prefix).
+local FLAGS_KILL_PLAYER	= bit_bor(REACTION_HOSTILE, CONTROL_HUMAN, UNITTYPE_PLAYER)
+local FLAGS_KILL_NPC	= bit_bor(REACTION_HOSTILE, CONTROL_SERVER, UNITTYPE_NPC)
 
 -- Commonly used flag combinations.
 local FLAGS_ME			= bit_bor(AFFILIATION_MINE, REACTION_FRIENDLY, CONTROL_HUMAN, UNITTYPE_PLAYER)
-local FLAGS_MINE		= bit_bor(AFFILIATION_MINE, REACTION_FRIENDLY, CONTROL_HUMAN)
-local FLAGS_MY_GUARDIAN	= bit_bor(AFFILIATION_MINE, REACTION_FRIENDLY, CONTROL_HUMAN, UNITTYPE_GUARDIAN)
 
 
 -------------------------------------------------------------------------------
@@ -101,15 +111,9 @@ local lastPetMapUpdate = 0
 local isUnitMapStale
 local isPetMapStale
 
--- Map of guids to unit ids.
-local unitMap = {}
-local petMap = {}
-
--- Map of functions to call for supported combat log events.
-local captureFuncs
-
--- Events to parse even if the source or recipient is not the player or pet.
-local fullParseEvents
+-- GUIDs of current group members and their pets (used to age the class map).
+local rosterGUIDs = {}
+local rosterPetGUIDs = {}
 
 -- Information about global strings for CHAT_MSG_X events.
 local searchMap
@@ -125,9 +129,27 @@ local parserEvent = {}
 -- List of functions to call when an event occurs.
 local handlers = {}
 
--- Holds information about reflected skills to track how much was reflected.
-local reflectedSkills = {}
-local reflectedTimes = {}
+-- Recent player/pet casts for UNIT_COMBAT spell correlation (Midnight 12.x feed).
+local recentCasts = {}
+
+-- Currently active ground effects (spellID -> {name, expires}).
+local activeGroundEffects = {}
+
+-- UNIT_COMBAT actions that map to miss events.
+local missActions = {
+	MISS = true, DODGE = true, PARRY = true, BLOCK = true, RESIST = true,
+	ABSORB = true, EVADE = true, IMMUNE = true, DEFLECT = true, REFLECT = true,
+}
+
+-- COMBAT_TEXT_UPDATE power tokens mapped to power types.
+local ctuPowerTypes = {
+	MANA = Enum.PowerType.Mana, RAGE = Enum.PowerType.Rage, FOCUS = Enum.PowerType.Focus,
+	ENERGY = Enum.PowerType.Energy, RUNIC_POWER = Enum.PowerType.RunicPower,
+	DEMONIC_FURY = Enum.PowerType.DemonicFury, HOLY_POWER = Enum.PowerType.HolyPower,
+	SOUL_SHARDS = Enum.PowerType.SoulShards, CHI = Enum.PowerType.Chi,
+	COMBO_POINTS = Enum.PowerType.ComboPoints, ARCANE_CHARGES = Enum.PowerType.ArcaneCharges,
+	ALTERNATE_POWER = Enum.PowerType.Alternate,
+}
 
 -- Holds information about guid to class mappings for known units.
 local classMapCleanupTime = 0
@@ -176,10 +198,11 @@ end
 -- ****************************************************************************
 local function SendParserEvent()
 	-- Add percentage calculation for outgoing damage events
-	if parserEvent.eventType == "damage" and parserEvent.sourceUnit == "player" and parserEvent.amount then
+	if parserEvent.eventType == "damage" and parserEvent.sourceUnit == "player" and parserEvent.amount and not issecretvalue(parserEvent.amount) then
 		if UnitExists("target") then
 			local targetMaxHealth = UnitHealthMax("target")
-			if targetMaxHealth and targetMaxHealth > 0 then
+			-- Midnight 12.x: enemy health may be a secret value; comparisons on it error.
+			if targetMaxHealth and not issecretvalue(targetMaxHealth) and targetMaxHealth > 0 then
 				local percentage = (parserEvent.amount / targetMaxHealth) * 100
 				if percentage >= 0.1 then -- Only show if >= 0.1%
 					local roundedPercentage = math.floor(percentage * 10) / 10
@@ -323,6 +346,9 @@ local function ParseSearchMessage(event, combatMessage)
 	-- Leave if there is no map of global strings to search for the event.
 	if (not searchMap[event]) then return end
 
+	-- Chat messages are secret in instances (Midnight 12.x); they can't be pattern matched then.
+	if (not combatMessage or issecretvalue(combatMessage)) then return end
+
 	-- Loop through all of the global strings to search for the event.
 	for _, globalStringName in pairs(searchMap[event]) do
 		-- Make sure the capture func for the global string exists.
@@ -365,82 +391,192 @@ end
 
 
 -- ****************************************************************************
--- Parses the parameter style events going to the combat log.
+-- Midnight 12.x data feeds.
+-- The combat log was removed in 12.0. These translators rebuild the normalized
+-- parserEvent table from the sanctioned feeds: UNIT_COMBAT (amounts),
+-- UNIT_SPELLCAST_SUCCEEDED (spell correlation), COMBAT_TEXT_UPDATE (typed
+-- player events) and PARTY_KILL (killing blows). Values arriving from the game
+-- may be secret in restricted content: never compare, measure, index by, or do
+-- arithmetic on them — only store, pass, concatenate, or string.format them.
 -- ****************************************************************************
-local function ParseLogMessage(timestamp, event, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, recipientGUID, recipientName, recipientFlags, recipientRaidFlags, ...)
-	-- Make sure the capture function for the event exists.
-	local captureFunc = captureFuncs[event]
-	if (not captureFunc) then return end
 
-	-- Look for spells the player reflected and make the damage belong to the player.
-	if (sourceGUID == recipientGUID and reflectedTimes[recipientGUID] and event == "SPELL_DAMAGE") then
-		local skillID = ...
-		if (skillID == reflectedSkills[recipientGUID]) then
-			-- Clear the reflected skill entries.
-			reflectedTimes[recipientGUID] = nil
-			reflectedSkills[recipientGUID] = nil
+-- ****************************************************************************
+-- Tracks recent player/pet spell casts so UNIT_COMBAT amounts can be
+-- correlated back to the spell that caused them.
+-- ****************************************************************************
+local function TrackSpellCast(unitID, castGUID, spellID)
+	-- Only the player's and pet's casts are correlated.
+	if (unitID ~= "player" and unitID ~= "pet") then return end
 
-			-- Change the source to the player.
-			sourceGUID = playerGUID
-			sourceName = playerName
-			sourceFlags = FLAGS_ME
-		end
+	-- Spell IDs can be secret in restricted content; nothing can be done with them then.
+	if (not spellID or issecretvalue(spellID)) then return end
+
+	local spellName, _, spellIcon = MSBTGetSpellInfo(spellID)
+	if (not spellName) then return end
+
+	-- Casts that can't produce combat events (mounts, shapeshifts, summons) would only
+	-- misattribute later ticks; clear the buffer instead of recording them.
+	-- (English name matching only — worst case elsewhere is a useless buffer entry.)
+	local lowerName = string.lower(spellName)
+	if (string_find(lowerName, "mount") or string_find(lowerName, "form") or string_find(lowerName, "travel") or string_find(lowerName, "flight") or string_find(lowerName, "summon") or spellID == 150544) then
+		EraseTable(recentCasts)
+		return
 	end
 
-	-- Attempt to figure out the source and recipient unitIDs.
-	local sourceUnit = unitMap[sourceGUID] or petMap[sourceGUID]
-	local recipientUnit = unitMap[recipientGUID] or petMap[recipientGUID]
+	-- Track long-duration ground effects separately; their ticks outlive the window.
+	if (PERSISTENT_SPELLS[spellID]) then
+		activeGroundEffects[spellID] = {name = spellName, expires = GetTime() + PERSISTENT_SPELLS[spellID]}
+	end
 
-	-- Treat guardians that are flagged as belonging to the player as their pet and vehicles and other objects as the player.
-	if (not sourceUnit and TestFlagsAll(sourceFlags, FLAGS_MINE)) then sourceUnit = TestFlagsAll(sourceFlags, FLAGS_MY_GUARDIAN) and "pet" or "player" end
-	if (not recipientUnit and TestFlagsAll(recipientFlags, FLAGS_MINE)) then recipientUnit = TestFlagsAll(recipientFlags, FLAGS_MY_GUARDIAN) and "pet" or "player" end
+	recentCasts[#recentCasts+1] = {time = GetTime(), spellID = spellID, spellName = spellName, spellIcon = spellIcon}
+	if (#recentCasts > MAX_RECENT_CASTS) then table.remove(recentCasts, 1) end
+end
 
-	-- Ignore the event if it is not one that should be fully parsed and it doesn't pertain to the player
-	-- or pet. This is done to avoid wasting time parsing events that won't be used like damage that other
-	-- players are doing.
-	if (not fullParseEvents[event] and sourceUnit ~= "player" and sourceUnit ~= "pet" and
-					recipientUnit ~= "player" and recipientUnit ~= "pet") then
-		return
+
+-- ****************************************************************************
+-- Returns the spell data for the most recent cast within the correlation window.
+-- ****************************************************************************
+local function CorrelateCast()
+	local now = GetTime()
+	for i = #recentCasts, 1, -1 do
+		local cast = recentCasts[i]
+		if (now - cast.time > CAST_CORRELATION_WINDOW) then break end
+		return cast.spellID, cast.spellName, cast.spellIcon
+	end
+
+	-- Ground effects (Consecration, Healing Rain, ...) tick long after the cast.
+	for spellID, effect in pairs(activeGroundEffects) do
+		if (now <= effect.expires) then return spellID, effect.name end
+		activeGroundEffects[spellID] = nil
+	end
+end
+
+
+-- ****************************************************************************
+-- Returns the name of a unit unless it's a secret value (restricted content).
+-- ****************************************************************************
+local function SafeUnitName(unitID)
+	local name = UnitName(unitID)
+	if (name and not issecretvalue(name)) then return name end
+end
+
+
+-- ****************************************************************************
+-- Checks one aura index on a unit; pcalled by FindPlayerAuraName since aura
+-- data access can error when auras are secret (Midnight 12.x).
+-- ****************************************************************************
+local function CheckAuraIndex(unitID, index, filter)
+	local aura = C_UnitAuras.GetAuraDataByIndex(unitID, index, filter)
+	if (not aura) then return "end" end
+
+	-- isFromPlayerOrPlayerPet is explicitly non-secret (12.0.5+).
+	if (aura.isFromPlayerOrPlayerPet == true) then
+		local name = aura.name
+		if (name and not issecretvalue(name)) then return "found", name end
+	end
+	return "skip"
+end
+
+
+-- ****************************************************************************
+-- Returns the name of the first player-sourced aura of the given filter on the
+-- unit, or nil when aura data is secret/unavailable. Used to name periodic
+-- ticks, which carry no spell reference on the Midnight 12.x feeds. Heuristic:
+-- the first player-sourced aura may not be the one actually ticking.
+-- ****************************************************************************
+local function FindPlayerAuraName(unitID, filter)
+	if (not C_UnitAuras or not C_UnitAuras.GetAuraDataByIndex) then return end
+	for i = 1, 40 do
+		local ok, state, name = pcall(CheckAuraIndex, unitID, i, filter)
+		if (not ok or state == "end") then break end
+		if (state == "found") then return name end
+	end
+end
+
+
+-- ****************************************************************************
+-- Parses UNIT_COMBAT events (damage, misses). UNIT_COMBAT reports what happened
+-- to a unit (the victim), not who caused it: wounds on units other than the
+-- player/pet are attributed to the player, which is approximate when others
+-- attack the same unit. Heals on the player come through COMBAT_TEXT_UPDATE.
+-- ****************************************************************************
+local function ParseUnitCombat(unitTarget, action, flagText, amount, schoolMask)
+	-- The action identifies the event family; nothing can be done if it's secret.
+	if (not action or issecretvalue(action)) then return end
+
+	-- Only wounds and miss-family actions map onto MSBT events.
+	local isWound = (action == "WOUND")
+	if (not isWound and not missActions[action]) then return end
+
+	-- Amounts can be secret in restricted content; never compare or do math on them here.
+	if (amount ~= nil and not issecretvalue(amount) and isWound and amount == 0) then return end
+
+	-- Figure out the direction from the affected unit.
+	local sourceUnit, recipientUnit, recipientFlags
+	if (unitTarget == "player") then
+		recipientUnit = "player"
+		recipientFlags = FLAGS_ME
+	elseif (unitTarget == "pet") then
+		recipientUnit = "pet"
+		recipientFlags = OBJECT_NONE
+	else
+		-- Wounds/misses on another unit are treated as outgoing.
+		sourceUnit = "player"
+		recipientFlags = OBJECT_NONE
 	end
 
 	-- Erase the parser event table.
 	for k in pairs(parserEvent) do parserEvent[k] = nil end
 
-	-- Populate fields that exist for all events.
-	parserEvent.sourceGUID = sourceGUID
-	parserEvent.sourceName = sourceName
-	parserEvent.sourceFlags = sourceFlags
+	-- Populate fields that exist for all events. The attacker is unknown on this feed.
 	parserEvent.sourceUnit = sourceUnit
-	parserEvent.recipientGUID = recipientGUID
-	parserEvent.recipientName = recipientName
-	parserEvent.recipientFlags = recipientFlags
+	parserEvent.sourceGUID = GUID_NONE
+	parserEvent.sourceFlags = OBJECT_NONE
 	parserEvent.recipientUnit = recipientUnit
+	parserEvent.recipientFlags = recipientFlags
 
-	-- Map the local arguments into the parser event table.
-	captureFunc(parserEvent, ...)
+	-- The affected unit's identity can be secret in restricted content.
+	local recipientName = SafeUnitName(unitTarget)
+	parserEvent.recipientName = recipientName or UNKNOWN
 
-	-- Merge Obliterate, Frost Strike and Stormstrike main hand and off-hand damage.
-	if parserEvent.skillID == 66198 then
-		parserEvent.skillName = Obliterate
-	elseif parserEvent.skillID == 66196 then
-		parserEvent.skillName = FrostStrike
-	elseif parserEvent.skillID == 32175 or parserEvent.skillID == 32176 then
-		parserEvent.skillName = Stormstrike
+	-- Map the unit's class for name coloring when it's knowable.
+	if (recipientName and unitTarget ~= "player" and unitTarget ~= "pet") then
+		local guid = UnitGUID(unitTarget)
+		if (guid and not issecretvalue(guid) and not classMap[guid]) then
+			local _, class = UnitClass(unitTarget)
+			if (class and not issecretvalue(class)) then classMap[guid] = class end
+		end
 	end
 
-	-- Track reflected skills.
-	if (parserEvent.eventType == "miss" and parserEvent.missType == "REFLECT" and recipientUnit == "player") then
-		-- Clean up old entries.
-		for guid, reflectTime in pairs(reflectedTimes) do
-			if (timestamp - reflectTime > REFLECT_HOLD_TIME) then
-				reflectedTimes[guid] = nil
-				reflectedSkills[guid] = nil
-			end
-		end
+	-- Crit / glancing / crushing flags. flagText can be compound (e.g. critical
+	-- blocks), so match by substring like prior art does.
+	if (flagText and not issecretvalue(flagText)) then
+		if (string_find(flagText, "CRITICAL")) then parserEvent.isCrit = true end
+		if (string_find(flagText, "GLANCING")) then parserEvent.isGlancing = true end
+		if (string_find(flagText, "CRUSHING")) then parserEvent.isCrushing = true end
+	end
 
-		-- Save the time of the reflect and the reflected skillID.
-		reflectedTimes[sourceGUID] = timestamp
-		reflectedSkills[sourceGUID] = parserEvent.skillID
+	-- Damage school for coloring (same numeric domain as the old combat log school mask).
+	if (schoolMask and not issecretvalue(schoolMask)) then parserEvent.damageType = schoolMask end
+
+	if (not isWound) then
+		parserEvent.eventType = "miss"
+		parserEvent.missType = action
+	else
+		parserEvent.eventType = "damage"
+		parserEvent.amount = amount
+
+		-- Correlate outgoing damage to the spell that caused it, if there is one.
+		if (sourceUnit) then
+			local spellID, spellName = CorrelateCast()
+			if (not spellName) then
+				-- Periodic ticks carry no cast reference; name them from the victim's auras.
+				spellName = FindPlayerAuraName(unitTarget, "HARMFUL")
+				if (spellName) then parserEvent.isDoT = true end
+			end
+			if (spellID) then parserEvent.skillID = spellID end
+			if (spellName) then parserEvent.skillName = spellName end
+		end
 	end
 
 	-- Send the event.
@@ -448,24 +584,153 @@ local function ParseLogMessage(timestamp, event, hideCaster, sourceGUID, sourceN
 end
 
 
+-- ****************************************************************************
+-- Parses COMBAT_TEXT_UPDATE events for the watched unit (the player). This is
+-- the same feed Blizzard's own floating combat text uses in Midnight. Damage
+-- and miss events are intentionally not handled here (UNIT_COMBAT covers them).
+-- ****************************************************************************
+local function ParseCombatTextUpdate(messageType)
+	if (not messageType or issecretvalue(messageType)) then return end
+
+	local data, arg3, arg4 = C_CombatText.GetCurrentEventInfo()
+
+	-- Aura gains and fades on the player.
+	if (messageType == "SPELL_AURA_START" or messageType == "SPELL_AURA_START_HARMFUL" or
+		messageType == "SPELL_AURA_END" or messageType == "SPELL_AURA_END_HARMFUL") then
+		-- Aura names can be secret in combat; nothing useful can be done with them then.
+		if (not data or issecretvalue(data)) then return end
+
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = "aura"
+		parserEvent.skillName = data
+		parserEvent.auraType = (messageType == "SPELL_AURA_START_HARMFUL" or messageType == "SPELL_AURA_END_HARMFUL") and AURA_TYPE_DEBUFF or AURA_TYPE_BUFF
+		if (messageType == "SPELL_AURA_END" or messageType == "SPELL_AURA_END_HARMFUL") then parserEvent.isFade = true end
+		parserEvent.sourceFlags = OBJECT_NONE
+		parserEvent.recipientUnit = "player"
+		parserEvent.recipientGUID = playerGUID
+		parserEvent.recipientName = playerName
+		parserEvent.recipientFlags = FLAGS_ME
+		SendParserEvent()
+
+	-- Heals on the player: data is the healer's name, arg3 the amount, arg4 the absorbed amount.
+	elseif (messageType == "HEAL" or messageType == "HEAL_CRIT" or messageType == "HEAL_ABSORB" or messageType == "HEAL_CRIT_ABSORB" or
+			messageType == "PERIODIC_HEAL" or messageType == "PERIODIC_HEAL_CRIT" or
+			messageType == "PERIODIC_HEAL_ABSORB" or messageType == "PERIODIC_HEAL_CRIT_ABSORB") then
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = "heal"
+		if (arg3 and not issecretvalue(arg3)) then arg3 = tonumber(arg3) or arg3 end
+		parserEvent.amount = arg3
+		if (string_find(messageType, "PERIODIC", 1, true)) then
+			parserEvent.isHoT = true
+			-- Periodic heals carry no spell reference; name them from the player's auras.
+			local auraName = FindPlayerAuraName("player", "HELPFUL")
+			if (auraName) then parserEvent.skillName = auraName end
+		end
+		if (string_find(messageType, "_CRIT", 1, true)) then parserEvent.isCrit = true end
+		if (arg4 and not issecretvalue(arg4)) then parserEvent.absorbAmount = tonumber(arg4) end
+		if (data and not issecretvalue(data)) then parserEvent.sourceName = data end
+		parserEvent.sourceFlags = OBJECT_NONE
+		parserEvent.recipientUnit = "player"
+		parserEvent.recipientGUID = playerGUID
+		parserEvent.recipientName = playerName
+		parserEvent.recipientFlags = FLAGS_ME
+		SendParserEvent()
+
+	-- Power gains on the player: data is the amount, arg3 the power token.
+	elseif (messageType == "ENERGIZE" or messageType == "PERIODIC_ENERGIZE") then
+		local powerType = (arg3 and not issecretvalue(arg3)) and ctuPowerTypes[arg3]
+		if (not powerType) then return end
+		if (not issecretvalue(data)) then data = tonumber(data) or data end
+
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = "power"
+		parserEvent.isGain = true
+		parserEvent.amount = data
+		parserEvent.powerType = powerType
+		parserEvent.sourceFlags = OBJECT_NONE
+		parserEvent.recipientUnit = "player"
+		parserEvent.recipientGUID = playerGUID
+		parserEvent.recipientName = playerName
+		parserEvent.recipientFlags = FLAGS_ME
+		SendParserEvent()
+
+	-- The player's cast was interrupted: data is the interrupted spell's name.
+	elseif (messageType == "INTERRUPT") then
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = "interrupt"
+		if (data and not issecretvalue(data)) then parserEvent.extraSkillName = data end
+		parserEvent.sourceFlags = OBJECT_NONE
+		parserEvent.recipientUnit = "player"
+		parserEvent.recipientGUID = playerGUID
+		parserEvent.recipientName = playerName
+		parserEvent.recipientFlags = FLAGS_ME
+		SendParserEvent()
+
+	-- Extra attacks granted: data is the spell name, arg3 the number of attacks.
+	elseif (messageType == "EXTRA_ATTACKS") then
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = "extraattacks"
+		if (data and not issecretvalue(data)) then parserEvent.skillName = data end
+		if (arg3 and not issecretvalue(arg3)) then parserEvent.amount = tonumber(arg3) end
+		parserEvent.sourceUnit = "player"
+		parserEvent.sourceGUID = playerGUID
+		parserEvent.sourceName = playerName
+		parserEvent.sourceFlags = FLAGS_ME
+		SendParserEvent()
+
+	-- Low health/mana warnings for the player (Blizzard's thresholds; these carry no
+	-- values, so they still fire when vitals are secret). Skipped when the player's
+	-- values aren't secret — the UNIT_HEALTH/UNIT_POWER_UPDATE triggers cover that.
+	elseif (messageType == "HEALTH_LOW" or messageType == "MANA_LOW") then
+		local isLowHealth = (messageType == "HEALTH_LOW")
+		local value = isLowHealth and UnitHealth("player") or UnitPower("player", Enum.PowerType.Mana)
+		if (not issecretvalue(value)) then return end
+
+		for k in pairs(parserEvent) do parserEvent[k] = nil end
+		parserEvent.eventType = isLowHealth and "lowhealth" or "lowmana"
+		parserEvent.sourceFlags = OBJECT_NONE
+		parserEvent.recipientUnit = "player"
+		parserEvent.recipientGUID = playerGUID
+		parserEvent.recipientName = playerName
+		parserEvent.recipientFlags = FLAGS_ME
+		SendParserEvent()
+	end
+end
+
+
+-- ****************************************************************************
+-- Parses PARTY_KILL events into killing blow notifications.
+-- ****************************************************************************
+local function ParsePartyKill(attackerGUID, targetGUID)
+	-- GUIDs are secret in restricted content; the attacker can't be verified then.
+	if (not attackerGUID or not targetGUID or issecretvalue(attackerGUID) or issecretvalue(targetGUID)) then return end
+
+	-- Only the player's own kills produce killing blows.
+	if (attackerGUID ~= playerGUID) then return end
+
+	-- Classify the victim as a player or NPC from its GUID prefix.
+	local recipientFlags = string_find(targetGUID, "^Player%-") and FLAGS_KILL_PLAYER or FLAGS_KILL_NPC
+
+	-- Resolve the victim's name when possible.
+	local recipientName = UnitNameFromGUID and UnitNameFromGUID(targetGUID)
+	if (recipientName and issecretvalue(recipientName)) then recipientName = nil end
+
+	for k in pairs(parserEvent) do parserEvent[k] = nil end
+	parserEvent.eventType = "kill"
+	parserEvent.sourceUnit = "player"
+	parserEvent.sourceGUID = playerGUID
+	parserEvent.sourceName = playerName
+	parserEvent.sourceFlags = FLAGS_ME
+	parserEvent.recipientGUID = targetGUID
+	parserEvent.recipientName = recipientName or UNKNOWN
+	parserEvent.recipientFlags = recipientFlags
+	SendParserEvent()
+end
+
+
 -------------------------------------------------------------------------------
 -- Startup utility functions.
 -------------------------------------------------------------------------------
-
--- ****************************************************************************
--- Creates a list of events that will be fully parsed even if they event
--- doesn't pertain to the player or player's pet.
--- ****************************************************************************
-local function CreateFullParseList()
-	fullParseEvents = {
-		SPELL_AURA_APPLIED = true,
-		SPELL_AURA_REMOVED = true,
-		SPELL_AURA_APPLIED_DOSE = true,
-		SPELL_AURA_REMOVED_DOSE = true,
-		SPELL_CAST_START = true,
-	}
-end
-
 
 -- ****************************************************************************
 -- Creates a map of global strings to search for CHAT_MSG_X events.
@@ -624,82 +889,6 @@ local function ConvertGlobalStrings()
 end
 
 
--- ****************************************************************************
--- Creates a map of capture functions for each supported combat log event.
--- ****************************************************************************
-local function CreateCaptureFuncs()
-	captureFuncs = {
-		-- Damage events.
-		SWING_DAMAGE = function (p, ...) p.eventType, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing = "damage", ... end,
-		RANGE_DAMAGE = function (p, ...) p.eventType, p.isRange, p.skillID, p.skillName, p.skillSchool, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing, p.isOffHand = "damage", true, ... end,
-		SPELL_DAMAGE = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing, p.isOffHand = "damage", ... end,
-		SPELL_PERIODIC_DAMAGE = function (p, ...) p.eventType, p.isDoT, p.skillID, p.skillName, p.skillSchool, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing, p.isOffHand = "damage", true, ... end,
-		SPELL_BUILDING_DAMAGE = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing = "damage", ... end,
-		DAMAGE_SHIELD = function (p, ...) p.eventType, p.isDamageShield, p.skillID, p.skillName, p.skillSchool, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing = "damage", true, ... end,
-		--SPELL_ABSORBED = function (p, ...) p.eventType, p.amount, p.skillID, p.skillName, p.skillSchool, p.absorbAmount = "damage", 0, ... end,
-		--[[SPELL_ABSORBED = function (p, ...)
-			--[dmgSpellID, dmgSpellName, dmgSpellSchool,] absorberGUID, absorberName, absorberFlags, absorberRaidFlags, absorbSkillID, absorbSkillName, absorbSkillSchool, absorbAmount
-			local offset = 5
-			if type(...) == "number" then offset = 8 end -- 1st param is spellID and not a GUID
-				p.eventType, p.amount, p.skillID, p.skillName, p.skillSchool, p.absorbAmount = "damage", 0, select(offset, ...)
-			end,]]
-
-		-- Miss events.
-		SWING_MISSED = function (p, ...) p.eventType, p.missType, p.isOffHand, p.amount = "miss", ... end,
-		RANGE_MISSED = function (p, ...) p.eventType, p.isRange, p.skillID, p.skillName, p.skillSchool, p.missType, p.isOffHand, p.amount = "miss", true, ... end,
-		SPELL_MISSED = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.missType, p.isOffHand, p.amount = "miss", ... end,
-		SPELL_PERIODIC_MISSED = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.missType, p.isOffHand, p.amount = "miss", ... end,
-		DAMAGE_SHIELD_MISSED = function (p, ...) p.eventType, p.isDamageShield, p.skillID, p.skillName, p.skillSchool, p.missType, p.isOffHand, p.amount = "miss", true, ... end,
-		SPELL_DISPEL_FAILED = function (p, ...) p.eventType, p.missType, p.skillID, p.skillName, p.skillSchool, p.extraSkillID, p.extraSkillName, p.extraSkillSchool = "miss", "RESIST", ... end,
-
-		-- Heal events.
-		SPELL_HEAL = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.amount, p.overhealAmount, p.absorbAmount, p.isCrit = "heal", ... end,
-		SPELL_PERIODIC_HEAL = function (p, ...) p.eventType, p.isHoT, p.skillID, p.skillName, p.skillSchool, p.amount, p.overhealAmount, p.absorbAmount, p.isCrit = "heal", true, ... end,
-
-		-- Environmental events.
-		ENVIRONMENTAL_DAMAGE = function (p, ...) p.eventType, p.hazardType, p.amount, p.overkillAmount, p.damageType, p.resistAmount, p.blockAmount, p.absorbAmount, p.isCrit, p.isGlancing, p.isCrushing = "environmental", ... end,
-
-		-- Power events.
-		SPELL_ENERGIZE = function (p, ...) p.eventType, p.isGain, p.skillID, p.skillName, p.skillSchool, p.amount, p.overEnergized, p.powerType = "power", true, ... p.amount = floor(p.amount * 10 + 0.5) / 10 end,
-		SPELL_DRAIN = function (p, ...) p.eventType, p.isDrain, p.skillID, p.skillName, p.skillSchool, p.amount, p.powerType, p.extraAmount = "power", true, ... end,
-		SPELL_LEECH = function (p, ...) p.eventType, p.isLeech, p.skillID, p.skillName, p.skillSchool, p.amount, p.powerType, p.extraAmount = "power", true, ... end,
-
-		-- Interrupt events.
-		SPELL_INTERRUPT = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.extraSkillID, p.extraSkillName, p.extraSkillSchool = "interrupt", ... end,
-
-		-- Aura events.
-		SPELL_AURA_APPLIED = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.auraType, p.amount = "aura", ... end,
-		SPELL_AURA_APPLIED_DOSE = function (p, ...) p.eventType, p.isDose, p.skillID, p.skillName, p.skillSchool, p.auraType, p.amount = "aura", true, ... end,
-		SPELL_AURA_REMOVED = function (p, ...) p.eventType, p.isFade, p.skillID, p.skillName, p.skillSchool, p.auraType, p.amount = "aura", true, ... end,
-		SPELL_AURA_REMOVED_DOSE = function (p, ...) p.eventType, p.isFade, p.isDose, p.skillID, p.skillName, p.skillSchool, p.auraType, p.amount = "aura", true, true, ... end,
-
-		-- Enchant events.
-		ENCHANT_APPLIED = function (p, ...) p.eventType, p.skillName, p.itemID, p.itemName = "enchant", ... end,
-		ENCHANT_REMOVED = function (p, ...) p.eventType, p.isFade, p.skillName, p.itemID, p.itemName = "enchant", true, ... end,
-
-		-- Dispel events.
-		SPELL_DISPEL = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.extraSkillID, p.extraSkillName, p.extraSkillSchool, p.auraType = "dispel", ... end,
-
-		-- Cast events.
-		SPELL_CAST_START = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool = "cast", ... end,
-
-		-- Kill events.
-		PARTY_KILL = function (p, ...) p.eventType = "kill" end,
-
-		-- Extra Attack events.
-		SPELL_EXTRA_ATTACKS = function (p, ...) p.eventType, p.skillID, p.skillName, p.skillSchool, p.amount = "extraattacks", ... end,
-	}
-
-	captureFuncs["DAMAGE_SPLIT"] = captureFuncs["SPELL_DAMAGE"]
-	captureFuncs["SPELL_PERIODIC_MISSED"] = captureFuncs["SPELL_MISSED"]
-	captureFuncs["SPELL_PERIODIC_ENERGIZE"] = captureFuncs["SPELL_ENERGIZE"]
-	captureFuncs["SPELL_PERIODIC_DRAIN"] = captureFuncs["SPELL_DRAIN"]
-	captureFuncs["SPELL_PERIODIC_LEECH"] = captureFuncs["SPELL_LEECH"]
-	captureFuncs["SPELL_STOLEN"] = captureFuncs["SPELL_DISPEL"]
-
-	-- Expose the capture functions.
-	module.captureFuncs = captureFuncs
-end
 
 
 -------------------------------------------------------------------------------
@@ -720,14 +909,14 @@ local function OnUpdateDelayedInfo(this, elapsed)
 			-- Update the player GUID if it isn't known yet and verify it's now known.
 			if (not playerGUID) then playerGUID = UnitGUID("player") end
 			if (playerGUID) then
-				-- Erase the unit map table and mark all old units for cleanup from the class map.
+				-- Mark all old group GUIDs for cleanup from the class map.
 				local now = GetTime()
-				for guid in pairs(unitMap) do
-					unitMap[guid] = nil
+				for guid in pairs(rosterGUIDs) do
+					rosterGUIDs[guid] = nil
 					classTimes[guid] = now + CLASS_HOLD_TIME
 				end
 
-				-- Loop through all of the group members and add them and their class to the maps.
+				-- Loop through all of the group members and add their class to the class map.
 				local unitPrefix = IsInRaid() and "raid" or "party"
 				local numGroupMembers = GetNumGroupMembers()
 				for i = 1, numGroupMembers do
@@ -735,14 +924,14 @@ local function OnUpdateDelayedInfo(this, elapsed)
 					-- XXX: This call is returning nil for party members in certain circumstances - need to debug further.
 					local guid = UnitGUID(unitID)
 					if (guid) then
-						unitMap[guid] = unitID
+						rosterGUIDs[guid] = true
 						if (not classMap[guid]) then _, classMap[guid] = UnitClass(unitID) end
 						classTimes[guid] = nil
 					end
 				end -- Loop through group members
 
-				-- Add the player and player's class to the maps.
-				unitMap[playerGUID] = "player"
+				-- Add the player and player's class to the class map.
+				rosterGUIDs[playerGUID] = true
 				if (not classMap[playerGUID]) then _, classMap[playerGUID] = UnitClass("player") end
 				classTimes[playerGUID] = nil
 
@@ -765,14 +954,14 @@ local function OnUpdateDelayedInfo(this, elapsed)
 			-- Verify the player's pet is not in an unknown state if there is one.
 			local petName = UnitName("pet")
 			if (not petName or petName ~= UNKNOWN) then
-				-- Erase the pet map table and mark all old units for cleanup from the class map.
+				-- Mark all old group pet GUIDs for cleanup from the class map.
 				local now = GetTime()
-				for guid in pairs(petMap) do
-					petMap[guid] = nil
+				for guid in pairs(rosterPetGUIDs) do
+					rosterPetGUIDs[guid] = nil
 					classTimes[guid] = now + CLASS_HOLD_TIME
 				end
 
-					-- Loop through all of the group members and add their pets and pet's class to the maps.
+					-- Loop through all of the group members and add their pets and pet's class to the class map.
 				local unitPrefix = IsInRaid() and "raidpet" or "partypet"
 				local numGroupMembers = GetNumGroupMembers()
 				for i = 1, numGroupMembers do
@@ -781,7 +970,7 @@ local function OnUpdateDelayedInfo(this, elapsed)
 						-- XXX: This call is returning nil for party members in certain circumstances - need to debug further.
 						local guid = UnitGUID(unitID)
 						if (guid ~= nil) then
-							petMap[guid] = unitID
+							rosterPetGUIDs[guid] = true
 							if (not classMap[guid]) then _, classMap[guid] = UnitClass(unitID) end
 							classTimes[guid] = nil
 						end
@@ -793,7 +982,7 @@ local function OnUpdateDelayedInfo(this, elapsed)
 					local unitID = "pet"
 					local guid = UnitGUID(unitID)
 					if (guid == UnitGUID("vehicle")) then unitID = "player" end
-					petMap[guid] = unitID
+					rosterPetGUIDs[guid] = true
 					if (not classMap[guid]) then _, classMap[guid] = UnitClass(unitID) end
 					classTimes[guid] = nil
 				end
@@ -816,28 +1005,45 @@ end
 -- Called when the events the parser registered for occur.
 -- ****************************************************************************
 local function OnEvent(this, event, arg1, arg2, ...)
-	-- Combat log events.
-	if (event == "COMBAT_LOG_EVENT_UNFILTERED") then
-		ParseLogMessage(CombatLogGetCurrentEventInfo())
+	-- Damage and miss events (Midnight 12.x feed).
+	if (event == "UNIT_COMBAT") then
+		ParseUnitCombat(arg1, arg2, ...)
+
+	-- Recent cast tracking for spell correlation.
+	elseif (event == "UNIT_SPELLCAST_SUCCEEDED") then
+		TrackSpellCast(arg1, arg2, ...)
+
+	-- Killing blows.
+	elseif (event == "PARTY_KILL") then
+		ParsePartyKill(arg1, arg2)
+
+	-- Player-centric typed combat text feed (auras, heals, power gains, interrupts).
+	elseif (event == "COMBAT_TEXT_UPDATE") then
+		ParseCombatTextUpdate(arg1)
 
 	-- Mouseover changes.
 	elseif (event == "UPDATE_MOUSEOVER_UNIT") then
 		-- Map the GUID for the moused over unit to a class.
+		-- Midnight 12.x: unit identity can be secret in restricted content.
 		local mouseoverGUID = UnitGUID("mouseover")
-		if (not mouseoverGUID) then return end
+		if (not mouseoverGUID or issecretvalue(mouseoverGUID)) then return end
 
 		-- Ignore the GUID if its class is already known and there is no cleanup time for it.
 		if (classMap[mouseoverGUID] and not classTimes[mouseoverGUID]) then return end
 
 		-- Update the cleanup time for the GUID and map it to a class if it's not already known.
 		classTimes[mouseoverGUID] = GetTime() + CLASS_HOLD_TIME
-		if (not classMap[mouseoverGUID]) then _, classMap[mouseoverGUID] = UnitClass("mouseover") end
+		if (not classMap[mouseoverGUID]) then
+			local _, class = UnitClass("mouseover")
+			if (class and not issecretvalue(class)) then classMap[mouseoverGUID] = class end
+		end
 
 	-- Target changes.
 	elseif (event == "PLAYER_TARGET_CHANGED") then
 		-- Map the GUID for the target unit to a class.
+		-- Midnight 12.x: unit identity can be secret in restricted content.
 		local targetGUID = UnitGUID("target")
-		if (not targetGUID) then return end
+		if (not targetGUID or issecretvalue(targetGUID)) then return end
 
 		-- Ignore the GUID if its class is already known and there is no cleanup time for it.
 		if (classMap[targetGUID] and not classTimes[targetGUID]) then return end
@@ -845,7 +1051,10 @@ local function OnEvent(this, event, arg1, arg2, ...)
 		-- Update the cleanup time for the GUID and map it to a class if it's not already known.
 		local now = GetTime()
 		classTimes[targetGUID] = now + CLASS_HOLD_TIME
-		if (not classMap[targetGUID]) then _, classMap[targetGUID] = UnitClass("target") end
+		if (not classMap[targetGUID]) then
+			local _, class = UnitClass("target")
+			if (class and not issecretvalue(class)) then classMap[targetGUID] = class end
+		end
 
 		-- Loop through all of the recent guid to class mappings and remove the old ones if enough time has passed.
 		if (now >= classMapCleanupTime) then
@@ -870,11 +1079,14 @@ local function OnEvent(this, event, arg1, arg2, ...)
 	-- Arena opponent changes.
 	elseif (event == "ARENA_OPPONENT_UPDATE") then
 		-- Map the unit id and GUID for an arena unit to a class when it's seen.
+		-- Midnight 12.x: arena unit identity is secret during matches.
 		if (arg2 == "seen") then
 			local arenaGUID = UnitGUID(arg1)
-			if (not arenaGUID) then return end
+			if (not arenaGUID or issecretvalue(arenaGUID)) then return end
+			local _, class = UnitClass(arg1)
+			if (not class or issecretvalue(class)) then return end
 			arenaUnits[arg1] = arenaGUID
-			_, classMap[arenaGUID] = UnitClass(arg1)
+			classMap[arenaGUID] = class
 
 		-- Remove the mappings for an arena unit when it's cleared.
 		elseif (arg2 == "cleared") then
@@ -895,8 +1107,14 @@ end
 -- Enables parsing.
 -- ****************************************************************************
 local function Enable()
-	-- Register for parameter style events going to the combat log.
-	eventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+	-- Register for the Midnight 12.x combat data feeds (the combat log was removed).
+	eventFrame:RegisterEvent("UNIT_COMBAT")
+	eventFrame:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+	eventFrame:RegisterEvent("PARTY_KILL")
+	if (C_CombatText) then
+		eventFrame:RegisterEvent("COMBAT_TEXT_UPDATE")
+		C_CombatText.SetActiveUnit("player")
+	end
 
 	-- Register CHAT_MSG_X search style events.
 	for event in pairs(searchMap) do
@@ -929,9 +1147,8 @@ local function Disable()
 	eventFrame:Hide()
 	eventFrame:UnregisterAllEvents()
 
-	-- Erase the reflected skill tables.
-	EraseTable(reflectedTimes)
-	EraseTable(reflectedSkills)
+	-- Erase the recent casts used for spell correlation.
+	EraseTable(recentCasts)
 end
 
 
@@ -952,10 +1169,6 @@ playerGUID = UnitGUID("player")
 -- Create various maps.
 CreateSearchMap()
 CreateSearchCaptureFuncs()
-CreateCaptureFuncs()
-
--- Create the list of events that should be fully parsed.
-CreateFullParseList()
 
 -- Find the rarest word for each supported global string.
 FindRareWords()
@@ -991,7 +1204,6 @@ module.TARGET_FOCUS			= TARGET_FOCUS
 module.OBJECT_NONE			= OBJECT_NONE
 
 -- Protected Variables.
-module.unitMap = unitMap
 module.classMap = classMap
 
 -- Protected Functions.

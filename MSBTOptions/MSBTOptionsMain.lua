@@ -19,6 +19,11 @@ local IsClassic = WOW_PROJECT_ID >= WOW_PROJECT_CLASSIC
 local MSBTControls = MSBTOptions.Controls
 local L = MikSBT.translations
 
+-- 12.x compat: fall back to table.* if the legacy globals are gone.
+local unpack = unpack or table.unpack
+local tinsert = tinsert or table.insert
+local tremove = tremove or table.remove
+
 
 -------------------------------------------------------------------------------
 -- Constants.
@@ -142,7 +147,7 @@ end
 -- Called when the main options frame is hidden.
 -- ****************************************************************************
 local function OnHideMainFrame(this)
-	PlaySound(799)
+	PlaySound(SOUNDKIT.GS_TITLE_OPTION_EXIT)
 	-- Hide the registered popup frames.
 	for frame in pairs(popupFrames) do
 		frame:Hide()
@@ -273,6 +278,12 @@ local function CreateMainFrame()
 	local fontString = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	fontString:SetText(WINDOW_TITLE)
 	fontString:SetPoint("TOP", mainFrame, "TOP", 0, -18)
+
+	-- Midnight 12.x restriction note.
+	local noteFontString = mainFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	noteFontString:SetText(L.MSG_MIDNIGHT_LIMITED)
+	noteFontString:SetTextColor(1, 0.7, 0.3)
+	noteFontString:SetPoint("TOP", fontString, "BOTTOM", 0, -2)
 
 	-- Close Button.
 	local frame = CreateFrame("Button", nil, mainFrame, "UIPanelCloseButton")

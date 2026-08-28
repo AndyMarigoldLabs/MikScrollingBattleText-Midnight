@@ -1,90 +1,36 @@
-**This project aims to update and maintain the MikScrollingBattleText (MSBT) addon, which may have been abandoned, while the original author continues their updates or if the project remains unmaintained.**
+# MikScrollingBattleText (MSBT) — Midnight
 
-# MikScrollingBattleText (MSBT)
+**A community-maintained restoration of Mik's Scrolling Battle Text for World of Warcraft: Midnight (patch 12.1).** Original addon by Mikord. This fork targets retail 12.x.
 
-MSBT is designed to be an extremely lightweight, efficient, and highly configurable mod that makes it easier to see combat information by scrolling the information on the screen in separate, dynamically creatable scroll areas. It is a replacement for Blizzard's Floating Combat Text and Damage output.
+MSBT is a lightweight, highly configurable replacement for Blizzard's floating combat text: incoming/outgoing damage and heals, notifications, and alerts scroll through separate, dynamically creatable scroll areas.
 
-## Features
+## Midnight status
 
-- Lightweight and efficient design.
-- Scroll incoming damage/heals, outgoing damage/heals, and notifications in separate configurable scroll areas on the playing field.
-- Display player and pet cooldown completion alerts.
-- Display loot alerts with a total of how many are now in inventory.
-- Add triggers that will allow you to show notifications based on a variety of conditions.
-- Assign a sound file to play for events/triggers.
-- Dynamically create new scroll areas and assign any event/trigger to them.
-- Customize the position, size, animation style, enabled state, font style, font size, font outline, and opacity for each of the scroll areas.
-- Customize each individual event's color, font style, font size, font outline, opacity, output message, enabled state, and scroll area.
-- Set "Master Font" settings that will be inherited by all of the scroll areas and the events in them unless they are overridden at the scroll area or event level.
-- Merge AoE data into one event with cumulative damage/healing done with number of normal and crits specified.
-- Show overhealing amounts against yourself or party/raid members.
-- Color unit names according to their class.
-- Color damage amounts according to damage type.
-- Show partial effects (resists, absorbs, vulnerabilities, etc) colored according to type.
-- Filter output information with a full suite of spam controls.
-- Load on demand options.
-- For mod developers:
-    - Output your own scrolling messages with the MikSBT.DisplayMessage function instead of having to create your own frame and animation code. You can also use your own font by first registering it with MSBT via the MikSBT.RegisterFont function.
-    - Create custom animation styles.
-    - See the included API.html file for reference information.
+Midnight (12.0) removed addon access to the combat log and made most combat data "secret" in combat, encounters, M+, and PvP. MSBT has been rebuilt around the remaining sanctioned feeds (`UNIT_COMBAT`, `COMBAT_TEXT_UPDATE`, `PARTY_KILL`).
 
-## Supported Events
+**Works:**
+- Incoming/outgoing damage, misses, and crits with damage-school coloring
+- Incoming heals (crit, HoT, and absorb variants; self-heals routed separately)
+- Player buff/debuff gain & fade notifications (where names aren't secret — typically out of combat / open world)
+- Power gains; combo point / Chi / Holy Power / Arcane Charge / Essence changes and FULL alerts; enter/leave combat
+- Killing blows; low health/mana/pet-health threshold triggers (with Blizzard-threshold fallback events where values are secret); aura-proc triggers (e.g. Clearcasting) by skill name
+- DoT/HoT ticks named via guarded aura lookups where auras aren't secret; ground-effect (Consecration, Healing Rain, …) attribution while active
+- Loot, money, reputation, XP, honor, and skill-up notifications (outside instances)
+- Cooldown completion alerts (out of combat)
+- Full customization: scroll areas, fonts, colors, animation styles, per-event output formats, icons, sounds
 
-- Incoming:
-    - Melee Damage, Misses, Dodges, Parries, Blocks, Deflects, Absorbs, and Immunes.
-    - Skill Damage, Damage Over Time (DoTs), Misses, Dodges, Parries, Blocks, Deflects, Absorbs, Immunes, Reflects, and Interrupts.
-    - Spell Resists.
-    - Heals and Heals Over Time (HoTs).
-    - Pet Melee Damage, Misses, Dodges, Parries, Blocks, Deflects, Absorbs, and Immunes.
-    - Pet Skill Damage, Damage Over Time (DoTs), Misses, Dodges, Parries, Blocks, Deflects, Absorbs, and Immunes.
-    - Pet Spell Resists.
-    - Pet Heals and Heals Over Time (HoTs).
-    - Environmental Damage.
-- Outgoing:
-    - Melee Damage, Misses, Dodges, Parries, Blocks, Deflects, Absorbs, Immunes, and Evades.
-    - Skill Damage, Damage Over Time (DoTs), Misses, Dodges, Parries, Blocks, Deflects, Absorbs, Immunes, Reflects, Interrupts, and Evades.
-    - Spell Resists and Buff Dispels.
-    - Heals and Heals Over Time (HoTs).
-    - Pet Melee Damage, Misses, Dodges, Parries, Blocks, Deflects, Absorbs, Immunes, and Evades.
-    - Pet Skill Damage, Damage Over Time (DoTs), Misses, Dodges, Parries, Blocks, Deflects, Absorbs, Immunes, and Evades.
-    - Pet Spell Resists and Buff Dispels.
-    - Pet Heals and Heals Over Time (HoTs).
-- Notification:
-    - Buffs / Buff Stacks / Buff Fades.
-    - Debuffs / Debuff Stacks / Debuff Fades.
-    - Item Buffs / Item Buff Fades.
-    - Enter/Leave Combat.
-    - Power Gains and Losses.
-    - Alternate Power Gains and Losses.
-    - Chi Gains and Chi Full.
-    - Combo Point Gains and Combo Points Full.
-    - Holy Power Changes and Holy Power Full.
-    - Honor Gains.
-    - Reputation Gains and Losses.
-    - Skill Gains.
-    - Experience Gains.
-    - Killing Blows (Player and NPC).
-    - Extra Attacks.
-    - Soul Shard Creation.
-    - Enemy Buff Gains.
-    - Monster Emotes.
-    - Player, Pet, and Item Cooldown Completions.
-- Loot:
-    - Looted Items.
-    - Money Gains.
-- Default Triggers:
-    - All Relevant Classes - Low Health, Low Mana, Low Pet Health.
-    - Death Knight - Killing Machine, Rime, Shadow Infusion x5.
-    - Druid - Berserk, Clearcasting, Predator's Swiftness, Shooting Stars.
-    - Hunter - Kill Shot, Lock and Load.
-    - Mage - Brain Freeze, Clearcasting, Fingers of Frost, Missile Barrage.
-    - Monk- Elusive Brew x5, x10, x15, Mana Tea x20, Vital Mists x5.
-    - Paladin - Hammer of Wrath, The Art of War.
-    - Priest - Clearcasting, Shadow Orb x3.
-    - Rogue - Blindside.
-    - Shaman - Clearcasting, Lava Surge, Maelstrom Weapon x5, Tidal Waves.
-    - Warlock - Decimation, Molten Core, Nightfall.
-    - Warrior - Bloodsurge, Execute, Revenge, Sudden Death, Taste for Blood, Victory Rush.
+**Degraded (API secrecy — the addon adapts automatically):**
+- Enemy names/classes in combat and instanced content display generically
+- AoE merging and spam throttles auto-disable where amounts are secret
+- Outgoing damage spell attribution uses recent-cast correlation plus ground-effect/aura fallbacks (approximate)
+- Cooldown alerts pause in combat
+- Execute-style (target health %) triggers may not fire in combat
+
+**Cut (no sanctioned API remains):**
+- Outgoing heals to other units; enemy buff gains; item buffs/enchants; dispel/steal alerts; power-loss (drain/leech) events; environmental typing; aura stack-count triggers; `skillID`-based trigger conditions
+- Chat-parsed notifications (loot/rep/XP/honor) are silent inside instances, where chat is secret
+
+Technical write-ups, phase plans, and the in-game test guide: [docs/midnight-12.1/](docs/midnight-12.1/README.md).
 
 ## Commands
 
@@ -99,8 +45,14 @@ MSBT is designed to be an extremely lightweight, efficient, and highly configura
 
 ## Installation
 
-1. Download ziped addon from [release page](https://github.com/Placidina/MikScrollingBattleText/releases).
-2. Extract the files and place the folder in `World of Warcraft/_retail_/Interface/AddOns/`.
-3. Enable the addon from the character selection screen in World of Warcraft.
+1. Download the zipped addon from the [releases page](https://github.com/Placidina/MikScrollingBattleText/releases).
+2. Extract and place the `MikScrollingBattleText` and `MSBTOptions` folders in `World of Warcraft/_retail_/Interface/AddOns/`.
+3. Enable both in the addon list.
 
-For more details, visit the [official CurseForge page](https://www.curseforge.com/wow/addons/mik-scrolling-battle-text).
+## For mod developers
+
+The display-side API is unchanged in Midnight — output your own scrolling messages with `MikSBT.DisplayMessage`, register custom fonts/sounds, and create custom animation styles. See [API.md](MikScrollingBattleText/API.md).
+
+## License & attribution
+
+Original MSBT © Mikord, all rights reserved. This is an unofficial community restoration; prior-art credit in [docs/midnight-12.1/](docs/midnight-12.1/README.md).

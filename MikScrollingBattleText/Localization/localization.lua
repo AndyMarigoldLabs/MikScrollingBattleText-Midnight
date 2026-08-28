@@ -94,3 +94,5 @@ L.MSG_KILLING_BLOW				= "Killing Blow"
 L.MSG_TRIGGER_LOW_HEALTH		= "Low Health"
 L.MSG_TRIGGER_LOW_MANA			= "Low Mana"
 L.MSG_TRIGGER_LOW_PET_HEALTH	= "Low Pet Health"
+
+L.MSG_MIDNIGHT_LIMITED		= "Midnight 12.x: some features are limited by Blizzard's API restrictions."

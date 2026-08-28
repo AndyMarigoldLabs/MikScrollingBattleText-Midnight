@@ -18,8 +18,10 @@ local string_gsub = string.gsub
 local string_format = string.format
 local math_ceil = math.ceil
 
-local GetItemInfo = C_Item and C_Item.GetItemInfo or GetItemInfo
-local GetItemCount = C_Item and C_Item.GetItemCount or GetItemCount
+-- Compat shims live in MikSBT.lua so all modules share one set of fallbacks.
+local GetItemInfo = MikSBT.GetItemInfo
+local GetItemCount = MikSBT.GetItemCount
+local GetItemClassInfo = MikSBT.GetItemClassInfo
 
 -- Local references to various modules for faster access.
 local MSBTProfiles = MikSBT.Profiles
@@ -36,7 +38,7 @@ local SILVER = string_gsub(SILVER_AMOUNT, "%%d *", "")
 local COPPER = string_gsub(COPPER_AMOUNT, "%%d *", "")
 
 -- Localized name for item types.
-local ITEM_TYPE_QUEST = _G.GetItemClassInfo(LE_ITEM_CLASS_QUESTITEM or Enum.ItemClass.Questitem)
+local ITEM_TYPE_QUEST = GetItemClassInfo(LE_ITEM_CLASS_QUESTITEM or Enum.ItemClass.Questitem)
 
 
 -------------------------------------------------------------------------------

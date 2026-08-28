@@ -62,8 +62,9 @@ local DEFAULT_STICKY_ANIMATION_STYLE = "Pow"
 -- Path to look for sound files.
 local DEFAULT_SOUND_PATH = "Interface\\AddOns\\MikScrollingBattleText\\Sounds\\"
 
--- Path to the temporary texture Blizzard uses when a skill texture is not known.
-local TEMP_TEXTURE_PATH = "Interface\\Icons\\Temp"
+-- Fallback texture when a skill texture is not known
+-- (the old Interface\Icons\Temp no longer ships with the client).
+local TEMP_TEXTURE_PATH = "Interface\\Icons\\INV_Misc_QuestionMark"
 
 
 -------------------------------------------------------------------------------
@@ -153,7 +154,7 @@ end
 
 -- ****************************************************************************
 -- Registers an animation style for non sticky events.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function RegisterAnimationStyle(styleID, initHandler, availableDirections, availableBehaviors, localizationTable)
 	-- Make sure there isn't already an animation style with the same name and the passed init function is valid.
@@ -173,7 +174,7 @@ end
 
 -- ****************************************************************************
 -- Registers an animation style for sticky events.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function RegisterStickyAnimationStyle(styleID, initHandler, availableDirections, availableBehaviors, localizationTable)
 	-- Make sure there isn't already an animation style with the same name and the passed init function is valid.
@@ -193,7 +194,7 @@ end
 
 -- ****************************************************************************
 -- Returns an iterator for the table containing the available scroll areas.
--- See the included API.html file for usage info.
+-- See the included API.md file for usage info.
 -- ****************************************************************************
 local function IterateScrollAreas()
 	return pairs(externalScrollAreas)
@@ -418,7 +419,7 @@ end
 -- ****************************************************************************
 -- Displays the passed message using the passed parameters. This function is
 -- for easy displaying of messages from external sources. See the included
--- API.html file for usage info.
+-- API.md file for usage info.
 -- ****************************************************************************
 local function DisplayMessage(message, scrollArea, isSticky, colorR, colorG, colorB, fontSize, fontName, outlineIndex, texturePath)
 	-- Do nothing if no message was passed or the mod is disabled.

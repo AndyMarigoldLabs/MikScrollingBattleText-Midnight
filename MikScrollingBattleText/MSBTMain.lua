@@ -26,7 +26,9 @@ local table_remove = table.remove
 local string_find = string.find
 local string_gsub = string.gsub
 local string_format = string.format
+local string_sub = string.sub
 local math_abs = math.abs
+local bit = bit or bit32 -- 12.x compat: fall back to bit32 if the legacy bit library is gone.
 local bit_bor = bit.bor
 local FormatLargeNumber = FormatLargeNumber
 local GetTime = GetTime
@@ -362,10 +364,13 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 		--if (powerType == powerTypes["ECLIPSE"]) then formattedAmount = math_abs(amount) end
 
 		-- Shorten amount with SI suffixes or separate into digit groups depending on options.
-		if (currentProfile.shortenNumbers) then
-			formattedAmount = ShortenNumber(formattedAmount, currentProfile.shortenNumberPrecision)
-		elseif (currentProfile.groupNumbers) then
-			formattedAmount = FormatLargeNumber(formattedAmount)
+		-- Midnight 12.x: secret amounts can't be shortened or grouped; pass them through raw.
+		if (not issecretvalue(formattedAmount)) then
+			if (currentProfile.shortenNumbers) then
+				formattedAmount = ShortenNumber(formattedAmount, currentProfile.shortenNumberPrecision)
+			elseif (currentProfile.groupNumbers) then
+				formattedAmount = FormatLargeNumber(formattedAmount)
+			end
 		end
 
 		-- Get the hex color for the damage type if there is one and coloring is enabled.
@@ -379,9 +384,10 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 
 		-- Add percentage for outgoing damage
 		local percentageText = ""
-		if UnitExists("target") and amount > 0 then
+		-- Midnight 12.x: amounts and enemy health can be secret values; no math allowed then.
+		if UnitExists("target") and not issecretvalue(amount) and amount > 0 then
 			local targetMaxHealth = UnitHealthMax("target")
-			if targetMaxHealth and targetMaxHealth > 0 then
+			if targetMaxHealth and not issecretvalue(targetMaxHealth) and targetMaxHealth > 0 then
 				local percentage = (amount / targetMaxHealth) * 100
 				if percentage >= 0.1 then
 					local roundedPercentage = math.floor(percentage * 10) / 10
@@ -391,7 +397,20 @@ local function FormatEvent(message, amount, damageType, overhealAmount, overkill
 		end
 
 		-- Substitute all %a event codes with the amount and percentage.
-		message = string_gsub(message, "%%a", formattedAmount .. partialAmount .. percentageText)
+		-- Midnight 12.x: gsub won't accept secret values; splice with plain find + concat instead.
+		local fullAmountText = formattedAmount .. partialAmount .. percentageText
+		if (issecretvalue(fullAmountText)) then
+			local out, rest = "", message
+			while (true) do
+				local startPos, endPos = string_find(rest, "%a", 1, true)
+				if (not startPos) then break end
+				out = out .. string_sub(rest, 1, startPos - 1) .. fullAmountText
+				rest = string_sub(rest, endPos + 1)
+			end
+			message = out .. rest
+		else
+			message = string_gsub(message, "%%a", fullAmountText)
+		end
 	end -- Substitute amount.
 
 
@@ -787,7 +806,8 @@ local function DamageHandler(parserEvent, currentProfile)
 	if (not eventTypeString) then return end
 
 	-- Ignore the event if the damage amount is under the damage threshold to be shown.
-	if (parserEvent.amount and parserEvent.amount < currentProfile.damageThreshold) then return end
+	-- Secret amounts (restricted content) can't be compared; show them unthresholded.
+	if (parserEvent.amount and not issecretvalue(parserEvent.amount) and parserEvent.amount < currentProfile.damageThreshold) then return end
 
 	-- Recharacterize hunter auto shots to melee damage.
 	local skillID = parserEvent.skillID
@@ -839,7 +859,8 @@ local function HealHandler(parserEvent, currentProfile)
 
 	local isHoT = parserEvent.isHoT
 	local amount = parserEvent.amount
-	if (amount) then
+	-- Secret amounts (restricted content) can't be compared; show them unthresholded.
+	if (amount and not issecretvalue(amount)) then
 		-- Ignore the event if the heal amount is under the healing threshold to be shown.
 		if (amount < currentProfile.healThreshold) then return end
 
@@ -1009,13 +1030,14 @@ local function PowerHandler(parserEvent, currentProfile)
 		amount = parserEvent.amount
 	end
 
-	if amount == 0 then
-		return
-	end
+	-- Secret amounts (restricted content) can't be compared; show them unthresholded.
+	if (amount and not issecretvalue(amount)) then
+		if (amount == 0) then return end
 
-	-- Ignore the event if the power change is under the threshold to be shown.
-	-- Take the absolute value to ensure negative power amounts such as Lunar Energy are handled correctly.
-	if (amount and math_abs(amount) < currentProfile.powerThreshold) then return end
+		-- Ignore the event if the power change is under the threshold to be shown.
+		-- Take the absolute value to ensure negative power amounts such as Lunar Energy are handled correctly.
+		if (math_abs(amount) < currentProfile.powerThreshold) then return end
+	end
 
 	-- Use a different event for alternate power.
 	local eventTypePrefix = "NOTIFICATION_POWER_"
@@ -1109,6 +1131,22 @@ end
 
 
 -- ****************************************************************************
+-- Handles low health parser events (Midnight 12.x: COMBAT_TEXT_UPDATE feed).
+-- ****************************************************************************
+local function LowHealthHandler(parserEvent, currentProfile)
+	return "NOTIFICATION_LOW_HEALTH"
+end
+
+
+-- ****************************************************************************
+-- Handles low mana parser events (Midnight 12.x: COMBAT_TEXT_UPDATE feed).
+-- ****************************************************************************
+local function LowManaHandler(parserEvent, currentProfile)
+	return "NOTIFICATION_LOW_MANA"
+end
+
+
+-- ****************************************************************************
 -- Parser events handler.
 -- ****************************************************************************
 local function ParserEventsHandler(parserEvent)
@@ -1177,6 +1215,10 @@ local function ParserEventsHandler(parserEvent)
 			_, _, effectTexture = MSBTGetSpellInfo(effectName)
 		end
 	end
+
+	-- Midnight 12.x: merging and throttling require arithmetic on amounts; force
+	-- direct display when the amount is a secret value.
+	if (mergeEligible and issecretvalue(parserEvent.amount)) then mergeEligible = false end
 
 	-- Event is not eligible to be merged so just display it now without processing the impossible fields.
 	if (not mergeEligible) then
@@ -1386,7 +1428,9 @@ function eventFrame:UNIT_POWER_UPDATE(unitID, powerToken)
 	if (not powerType) then return end
 
 	-- Get the current power amount for the power type that changed.
+	-- Midnight 12.x: primary power values are secret in combat; skip rather than error.
 	local powerAmount = UnitPower("player", powerType)
+	if (issecretvalue(powerAmount)) then return end
 
 	local doFullDetect = true
 	local lastPowerAmount = lastPowerAmounts[powerType]
@@ -1452,8 +1496,12 @@ end
 -- Called when a unit's combo points change.
 -- ****************************************************************************
 function eventFrame:CHAT_MSG_MONSTER_EMOTE(message, sourceName)
+	-- Chat messages and unit names can be secret in restricted content (Midnight 12.x).
+	if (issecretvalue(message) or issecretvalue(sourceName)) then return end
+
 	-- Ignore the event if it's not the current target.
-	if (sourceName ~= UnitName("target")) then return end
+	local targetName = UnitName("target")
+	if (issecretvalue(targetName) or sourceName ~= targetName) then return end
 	HandleMonsterEmotes(string_gsub(message, "%%s", sourceName))
 end
 
@@ -1518,6 +1566,8 @@ eventHandlers["reputation"] = ReputationHandler
 eventHandlers["proficiency"] = ProficiencyHandler
 eventHandlers["experience"] = ExperienceHandler
 eventHandlers["extraattacks"] = ExtraAttacksHandler
+eventHandlers["lowhealth"] = LowHealthHandler
+eventHandlers["lowmana"] = LowManaHandler
 
 -- Create the power tokens lookup map.
 for powerToken, powerType in pairs(powerTypes) do

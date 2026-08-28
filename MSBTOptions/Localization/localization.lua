@@ -494,6 +494,8 @@ obj["NOTIFICATION_BUFF_FADE"]			= { label="Buff Fades", tooltip="Enable buffs th
 obj["NOTIFICATION_ITEM_BUFF_FADE"]		= { label="Item Buff Fades", tooltip="Enable item buffs that have faded from you."}
 obj["NOTIFICATION_COMBAT_ENTER"]		= { label="Enter Combat", tooltip="Enable when you have entered combat."}
 obj["NOTIFICATION_COMBAT_LEAVE"]		= { label="Leave Combat", tooltip="Enable when you have left combat."}
+obj["NOTIFICATION_LOW_HEALTH"]			= { label="Low Health", tooltip="Midnight fallback: fires at Blizzard's low-health threshold only when exact health values are hidden (the Low Health trigger covers it otherwise)."}
+obj["NOTIFICATION_LOW_MANA"]			= { label="Low Mana", tooltip="Midnight fallback: fires at Blizzard's low-mana threshold only when exact mana values are hidden (the Low Mana trigger covers it otherwise)."}
 obj["NOTIFICATION_POWER_GAIN"]			= { label="Power Gains", tooltip="Enable when you gain extra mana, rage, or energy."}
 obj["NOTIFICATION_POWER_LOSS"]			= { label="Power Losses", tooltip="Enable when you lose mana, rage, or energy from drains."}
 obj["NOTIFICATION_ALT_POWER_GAIN"]		= { label="Alternate Power Gains", tooltip="Enable when you gain alternate power such as sound level on Atramedes."}

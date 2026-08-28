@@ -193,7 +193,7 @@ end
 local function Listbox_OnClickUp(this)
 	local listbox = this:GetParent():GetParent()
 	Listbox_ScrollUp(listbox)
-	PlaySound(826)
+	PlaySound(SOUNDKIT.IG_CHAT_SCROLL_UP)
 end
 
 
@@ -203,7 +203,7 @@ end
 local function Listbox_OnClickDown(this)
 	local listbox = this:GetParent():GetParent()
 	Listbox_ScrollDown(listbox)
-	PlaySound(827)
+	PlaySound(SOUNDKIT.IG_CHAT_SCROLL_DOWN)
 end
 
 
@@ -607,7 +607,7 @@ end
 -- ****************************************************************************
 local function Checkbox_OnClick(this)
 	local isChecked = this:GetChecked() and true or false
-	if (isChecked) then PlaySound(856) else PlaySound(857) end
+	if (isChecked) then PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON) else PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_OFF) end
 
 	local checkbox = this:GetParent()
 	if (checkbox.clickHandler) then checkbox:clickHandler(isChecked) end
@@ -776,7 +776,7 @@ end
 -- Called when the button is clicked.
 -- ****************************************************************************
 local function Button_OnClick(this)
-	PlaySound(856)
+	PlaySound(SOUNDKIT.IG_MAINMENU_OPTION_CHECKBOX_ON)
 	if (this.clickHandler) then this:clickHandler() end
 end
 
@@ -1762,47 +1762,26 @@ end
 
 
 -- ****************************************************************************
--- Called when the color picker values change.
--- ****************************************************************************
-local function Colorswatch_ColorPickerOnChange(this)
-	local colorswatch = ColorPickerFrame.associatedColorSwatch
-	if (not colorswatch) then return end
-
-	Colorswatch_SetColor(colorswatch, ColorPickerFrame:GetColorRGB())
-	if (colorswatch.colorChangedHandler) then colorswatch:colorChangedHandler() end
-end
-
-
--- ****************************************************************************
--- Called when the color picker values change.
--- ****************************************************************************
-local function Colorswatch_ColorPickerOnCancel(previousValues)
-	local colorswatch = ColorPickerFrame.associatedColorSwatch
-	if (not colorswatch) then return end
-
-	Colorswatch_SetColor(colorswatch, previousValues.r, previousValues.g, previousValues.b)
-	if (colorswatch.colorChangedHandler) then colorswatch:colorChangedHandler() end
-end
-
-
--- ****************************************************************************
 -- Called when the colorswatch is clicked.
 -- ****************************************************************************
 local function Colorswatch_OnClick(this)
-	local tempR = this.r or 1
-	local tempG = this.g or 1
-	local tempB = this.b or 1
-
-	ColorPickerFrame.associatedColorSwatch = this
-	ColorPickerFrame.hasOpacity = false
-	ColorPickerFrame.opacity = 1
-	ColorPickerFrame.previousValues = {r = tempR, g = tempG, b = tempB}
-	ColorPickerFrame.func = Colorswatch_ColorPickerOnChange
-	ColorPickerFrame.cancelFunc = Colorswatch_ColorPickerOnCancel
-	ColorPickerFrame:SetColorRGB(tempR, tempG, tempB)
-	ColorPickerFrame:ClearAllPoints()
-	ColorPickerFrame:SetPoint("CENTER", this, "CENTER")
-	ColorPickerFrame:Show()
+	-- Modern color picker API (10.2.5+): configuration goes through an info table.
+	local info = {
+		r = this.r or 1,
+		g = this.g or 1,
+		b = this.b or 1,
+		hasOpacity = false,
+		swatchFunc = function()
+			Colorswatch_SetColor(this, ColorPickerFrame:GetColorRGB())
+			if (this.colorChangedHandler) then this:colorChangedHandler() end
+		end,
+		cancelFunc = function()
+			local prevR, prevG, prevB = ColorPickerFrame:GetPreviousValues()
+			if (prevR) then Colorswatch_SetColor(this, prevR, prevG, prevB) end
+			if (this.colorChangedHandler) then this:colorChangedHandler() end
+		end,
+	}
+	ColorPickerFrame:SetupColorPickerAndShow(info)
 end
 
 
